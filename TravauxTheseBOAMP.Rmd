@@ -1,0 +1,2084 @@
+---
+title: "Marché de l'évaluation 2006 - 2023"
+author: "Paul Cotton"
+date: "9/14/2023"
+editor_options: 
+ chunk_output_type: console
+---
+Les filtres utilisés dans la CONSOLE DE L'API attention la CONSOLE : https://boamp-datadila.opendatasoft.com/api/explore/v2.1/console
+dateparution>2006 and (objet like "evaluation" or objet like "evaluative" or objet like "evaluatif" or objet like "evaluation de l'impact")
+
+# LANCEMENT SANS PREPA
+Plusieurs bases sont automatiquement chargées : 
+- TOTAL contient toutes les données nettoyées avec les doublons d'attribution de marché 
+- boampdataBDD retire les doublons dans attribution de marché mais conserver les lignes d'attribution de marché quand le marché en question n'était pas déjà intégré à la base (cela veut dire que seule la notification d'attribution a été publiée)
+- Attribution_unique est une base qui est intégrée à baompdataBDD
+- Attribution_doublon sont les marchés pour lesquels il y a un doublon dans "objet" et au moins un de ces doublons qui sont des attributions de marché. Ces lignes ont été retirées de la base boampdataBDD. Elles contiennent toutefois des informations sur les titulaires des marchés publics qui pourront s'avérer utiles pour des traitement sur les titulaires (utiliser la base TOTAL)
+
+```{r setup,echo= FALSE}
+# install.packages("writexl")
+# install.packages("stringdist")
+# install.packages("tokenizers")
+# install.packages("text2vec")
+# install.packages("stringi")
+library(tidytext)
+library(dplyr)
+library(tidyverse)
+library(stargazer)
+library(writexl)
+library(knitr)
+library(kableExtra)
+library(formattable)
+library(scales) # pour alpha()
+library(rvest)
+library(stringi)
+library(jsonlite)
+library(lubridate)
+library(openxlsx)
+library(stringr)
+library(sf)
+library(maps)
+library(ggplot2)
+library(ggrepel)
+library(readxl)
+library(stringdist) # pour analyse des attributaires des marchés 
+library(tm)
+library(topicmodels)
+library(slam)
+library(word2vec)
+library(text2vec)
+library(tokenizers)
+library(data.table)
+library(stringi)
+library(viridis)
+
+
+load(file = "/Users/paulcotton/Desktop/Archivesmarket/Scrap/Sauvegarde dataset/240122_BDDtravail.Rdata") 
+#N=7438
+
+# la base du 240120 N=6547
+
+# Palettes
+ma_palette <- scale_fill_gradient(low = "#EEE6D8", high = "#93441A")
+colorsgroup <- c("Etat" = "#390099", "Collectivités" = "#9e0059", "Etablissements publics" = "#ff0054", "Autres_acteurs" = "#ff5400")
+
+colorsdegradés <- list(
+  Etat = c("#1c004c", "#22005c", "#28006b", "#2e007a", "#33008a", "#8942ff"),
+  Collectivités = c("#4f002c", "#760043", "#9e0059"),
+  `Etablissements publics` = c("#80002a", "#aa0038", "#d40046", "#ff0054"),
+  Autres_acteurs = "#ff5400"
+)
+
+colorsfamilles<- list(
+  Etat = c("#1c004c", "#22005c", "#28006b", "#2e007a", "#33008a", "#8942ff"),
+  Collectivités = c("#4f002c", "#760043", "#9e0059"),
+  `Etablissements publics` = c("#80002a", "#aa0038", "#d40046", "#ff0054"),
+  Autres_acteurs = "#ff5400"
+)
+
+colorsfamilles <- c("Marchés <90 k€ (MAPA)" = "#E8E9ED", "Marchés entre 90 k€ et seuils européens"="#BABFD1", "Marchés européens"="#607196")
+
+colorsdegrad <- c(
+  Département = colorsdegradés$Collectivités[1],
+  Région = colorsdegradés$Collectivités[2],
+  `Ville / communauté de communes / Métropole` = colorsdegradés$Collectivités[3],
+  Autre = colorsdegradés$Autres_acteurs[1],
+  `Associations / Fondation` = colorsdegradés$Autres_acteurs[2],
+  `Supra-national (UE, nations unies)` = colorsdegradés$Autres_acteurs[3],
+  `Chambres consulaires` = colorsdegradés$`Etablissements publics`[1],
+  `Etablissement public (EPA, EPIC, GIP, syndicat mixte, etc.)` = colorsdegradés$`Etablissements publics`[2],
+  `Agence de l'Etat` = colorsdegradés$Etat[1],
+  `Assemblee Nationale / Senat` = colorsdegradés$Etat[2],
+  `Caisse nationale (CAF, CNAF, CNAM, etc.)` = colorsdegradés$Etat[3],
+  `Cour des comptes / Conseil d'Etat` = colorsdegradés$Etat[4],
+  `Etat central` = colorsdegradés$Etat[5],
+  `Etat deconcentré` = colorsdegradés$Etat[6]
+)
+
+generate_palette <- function(color, n) {
+  sapply(seq(0.2, 1, length.out = n), function(alpha) alpha(color, alpha))
+}
+
+categories_per_group <- boampdataBDD %>% 
+  group_by(Groupe_commanditaires, categorie) %>% 
+  summarize() %>%
+  count(Groupe_commanditaires)
+generate_palette <- function(color, n) {
+  sapply(seq(0.2, 1, length.out = n), function(alpha) alpha(color, alpha))
+}
+color_palettes <- lapply(names(colors), function(group) {
+  generate_palette(colors[group], categories_per_group$n[categories_per_group$Groupe_commanditaires == group])
+})
+```
+
+
+# PREPARATION DES DONNEES 
+## Compiler les données
+```{r setup}
+boampdataimpot <- read.delim("/Users/paulcotton/Desktop/Archivesmarket/Scrap/smallboamp.csv", header = TRUE, sep=";")
+# Cette base prend uniquement les mots clefs évaluation et supérieur à 2006 dans la BDD de l'ensemble du BOAMP
+# téléchargé via l'API https://boamp-datadila.opendatasoft.com/explore/dataset/boamp/api/?dataChart=eyJxdWVyaWVzIjpbeyJjb25maWciOnsiZGF0YXNldCI6ImJvYW1wIiwib3B0aW9ucyI6e319LCJjaGFydHMiOlt7ImFsaWduTW9udGgiOnRydWUsInR5cGUiOiJhcmVhIiwiZnVuYyI6IkNPTlNUQU5UIiwic2NpZW50aWZpY0Rpc3BsYXkiOnRydWUsImNvbG9yIjoicmFuZ2UtQWNjZW50In1dLCJ4QXhpcyI6ImNvZGVfZGVwYXJ0ZW1lbnQiLCJtYXhwb2ludHMiOm51bGwsInRpbWVzY2FsZSI6IiIsInNvcnQiOiIiLCJzZXJpZXNCcmVha2Rvd24iOiJmYW1pbGxlIiwic3RhY2tlZCI6IiJ9XSwiZGlzcGxheUxlZ2VuZCI6dHJ1ZSwiYWxpZ25Nb250aCI6dHJ1ZSwidGltZXNjYWxlIjoiIn0%3D
+
+dataPCxFM <- read_xlsx("/Users/paulcotton/Desktop/Archivesmarket/Scrap/BDD fm et pc2.xlsx")
+
+# Resserer la base que sur des vraies évaluations, en virant ce qui n'est pas des marchés de conseil en évaluation de politiques publiques (exemple : diagnostics urbains). La base passe de 10 218 à 4559 observations 
+boampdataBDDavantfusion <- boampdata %>%
+      filter(!(type_marche == "TRAVAUX") | is.na(type_marche)) %>%
+      mutate(descripteur_libelle = tolower(descripteur_libelle))
+
+boampdataBDDavantfusion <- boampdataBDDavantfusion %>%
+      filter(str_detect(descripteur_libelle,"etude|audit|prestation|controle"))%>%
+      filter(!str_detect(descripteur_libelle,"logiciel|informatique|télécommunicatione|évaluation de l'étate|publicité|nettoyage|entretien|informatique|bâtiment|animaux|amiante|radar|manutention|juridique|maintenance|alimentation|logiciel|vidéo|forage|hotelière|analyses médicales|abris|assainissement|audiovisuel|assurance|restauration|déchet|expertise comptable|travaux|voyage|eau|sonor|repas|surveillance|librufiant|eolienne|détachées|art|impression|agricole|topographie|télécommunications|signalisation|sanitaire|ruisseaux|tabac|matériel|internet|impr|mur|électronique|livres|portuaire|civil|archéologique|etanch|equipement|élec|aliment|contrôle technique|fore|bassin|literie|sport|mater|photovo|arement"))
+
+#On peut pas filtrer avec les libelle c'est pas fiable. Donc être large. Exemple : "prestations d'évaluation de politiques publiques pour les besoins départementaux" est considéré comme de l'audit
+
+boampdataBDDavantfusion <- boampdataBDDavantfusion %>%
+    mutate(objet = tolower(objet)) %>% #minuscule
+    mutate(objet = stri_trans_general(objet, "Latin-ASCII")) #enlever les accents 
+
+# TRI dans ce qui n'est pas de l'évaluation de politique publique 
+
+#Suppression si mots clefs avec conditions de non présence de certains termes 
+#Cela permet par exemple d'enlever ce qui relève des prestations de psy mais garder les PP qui agissent sur ces dispositifs de psy 
+boampdataBDDavantfusion <- boampdataBDDavantfusion %>%
+ filter(!(
+    (grepl("evaluation externe", objet, ignore.case = TRUE)|
+       grepl("audit", objet, ignore.case = TRUE) |
+       grepl("medico-sociale", objet, ignore.case = TRUE) |
+       grepl("competence", objet, ignore.case = TRUE)|
+       grepl("energetique", objet, ignore.case = TRUE) |
+       grepl("psy", objet, ignore.case = TRUE) |
+       grepl("performance", objet, ignore.case = TRUE)) &
+       !grepl("experiment|politique|dispositif|programme", objet, ignore.case = TRUE)
+  ))
+
+boampdataBDDavantfusion <- boampdataBDDavantfusion %>%
+ filter(!(
+    (grepl("qualite", objet, ignore.case = TRUE)|
+     grepl("risque", objet, ignore.case = TRUE))&
+    !grepl("programme|contrat territorial", objet, ignore.case = TRUE)
+  ))
+
+boampdataBDDavantfusion <- boampdataBDDavantfusion %>%
+ filter(!(
+     grepl("patrimoine", objet, ignore.case = TRUE)&
+    !grepl("questionnaire", objet, ignore.case = TRUE)
+  ))
+
+boampdataBDDavantfusion <- boampdataBDDavantfusion %>%
+ filter(!(
+    grepl("immobilier", objet, ignore.case = TRUE)&
+    !grepl("aide|schéma|plan", objet, ignore.case = TRUE)
+  ))
+boampdataBDDavantfusion <- boampdataBDDavantfusion %>%
+ filter(!(
+    grepl("exposition", objet, ignore.case = TRUE)&
+    !grepl("bilan", objet, ignore.case = TRUE)
+  ))
+
+
+#Suppression si mots clefs 
+achercher <- c("evaluation professionnelle","des risques","candidats", "entretiens", "joints", "des dossiers", "chaussees","prestations de recrutement","evaluation de la toxicite","de securite","evaluation de niveau","evaluation de la qualité","bilans d'evaluation professionnelle","developpement d'une application","hydrobiologique","plomb","service d'insertion professionnelle","pratiques professionnelles","biol","certification","voirie","de la securite","cyber securite","evaluation interne","engin","evaluation speciale","diagnostic energetique","reparation","evaluation technique","amiante","geotechnique","restauration","gros oeuvre","pollue","proprete","potentiellement","gisement","aptitudes","manager","evaluation d'actifs","autoroute","volumes","chimi","molecule","	
+etude clinique","bacterio","pre-clinique","preclinique","employabilite","evaluation individuel","individual","evaluation des etablissements","technico-operationnelle","capacites","bruit","acoustique","vulnerabilite","sismique","satellites")
+asupprimer <- paste(achercher, collapse = "|")
+boampdataBDDavantfusion <- boampdataBDDavantfusion[!grepl(asupprimer, boampdataBDDavantfusion$objet, ignore.case = TRUE), ]
+
+#Repérer les mots clefs à supprimer 
+word_counts <- boampdataBDDavantfusion %>%
+  unnest_tokens(word, objet) %>%  # Convertir les phrases en mots
+  count(word, sort = TRUE)        # Compter et trier les mots
+top_words_df <- word_counts %>%
+  filter(n > 5)                   # Filtrer pour garder les mots avec plus d'une occurrence
+
+rm(word_counts,top_words_df)
+
+#Fusion des 2 bases de données
+# Renommez les colonnes de dataPCxFM pour les faire correspondre à boampdataBDDavantfusion
+dataPCxFM <- dataPCxFM[, !names(dataPCxFM) %in% c("Evaluation", "Impact")]
+names(dataPCxFM)[names(dataPCxFM) == "Dept"] <- "code_departement"
+names(dataPCxFM)[names(dataPCxFM) == "date"] <- "dateparution"
+names(dataPCxFM)[names(dataPCxFM) == "intitule"] <- "objet"
+names(dataPCxFM)[names(dataPCxFM) == "Commanditaire"] <- "nomacheteur"
+dataPCxFM <- dataPCxFM[!is.na(dataPCxFM$dateparution), ] # Retire environ 100 lignes
+
+for(col in setdiff(names(boampdataBDDavantfusion), names(dataPCxFM))) {
+  dataPCxFM[[col]] <- NA
+}
+
+#Mettre les classes au meme format pour la date
+boampdataBDDavantfusion$dateparution <- as.Date(boampdataBDDavantfusion$dateparution)
+dataPCxFM$dateparution <- as.Date(dataPCxFM$dateparution)
+dataPCxFM <- dataPCxFM %>%
+    mutate(objet = tolower(objet)) %>% #minuscule
+    mutate(objet = stri_trans_general(objet, "Latin-ASCII")) #enlever les accents 
+
+# Fusionnez les deux dataframes
+data_combinée <- rbind(boampdataBDDavantfusion, dataPCxFM)
+
+
+# Prioriser  les données de la base BOAMP en cas de doublons avec la base PP
+data_combinée <- data_combinée[!duplicated(data_combinée$objet) | !duplicated(data_combinée$objet, fromLast = TRUE), ]
+boampdataBDD <- data_combinée
+
+rm(data_combinée,boampdata,boampdataBDDavantfusion,dataPCxFM)
+
+# Retirer les AO rectificatifs : 
+boampdataBDD <- boampdataBDD %>%
+filter(nature != "RECTIFICATIF" | is.na(nature))
+
+# Créer une variable date parution simplifiée pour faire de regroupements plus tard 
+is_date_column <- function(column) {all(suppressWarnings(!is.na(as.Date(column))))}
+is_date <- is_date_column(boampdataBDD$dateparution)
+if (is_date) {
+  cat("La colonne est correctement codée comme une colonne de date.\n")
+} else {
+  cat("La colonne n'est pas correctement codée comme une colonne de date.\n")
+}
+boampdataBDD <- boampdataBDD %>%
+  mutate(MOIS_ANNEE_Parution = dateparution) %>%
+  mutate(MOIS_ANNEE_Parution = format(as.Date(MOIS_ANNEE_Parution, format = "%Y-%m-%d"), format = "%m-%Y")) %>%
+  mutate(ANNEE_Parution = substr(MOIS_ANNEE_Parution, start = 4, stop = 7))
+
+#Supprimer les variables inutiles 
+colnames(boampdataBDD)
+colonnes_a_supprimer <- c("idweb","id","annonce_reference_schema_v110","annonce_reference_schema_v110","code_departement_prestation","perimetre","dc","type_marche_facette","annonce_lie","annonces_anterieures","annonces_anterieures_schema_v110","gestion","donnees","nature_categorise","nature_categorise_libelle","marche_public_simplifie_label","annonce_lie","annonces_anterieures")
+
+supprimer_colonnes <- function(data, colonnes_a_supprimer) {
+  colonnes_existantes <- colnames(data)
+  colonnes_inconnues <- setdiff(colonnes_a_supprimer, colonnes_existantes)
+    if (length(colonnes_inconnues) > 0) {
+    cat("Les colonnes suivantes n'existent pas dans la base de données et ne peuvent pas être supprimées :", paste(colonnes_inconnues, collapse = ", "), "\n") #si ce message s'affiche reprendre la liste des colonnes à supprimer
+    return(data)
+  } else {
+    # Supprimer les colonnes spécifiées
+    data <- data[, !colnames(data) %in% colonnes_a_supprimer, drop = FALSE]
+    return(data)
+  }
+}
+boampdataBDD <- supprimer_colonnes(boampdataBDD, colonnes_a_supprimer)
+
+
+#Créer un identifiant unique pour chaque ligne
+boampdataBDD$id_unique <- sapply(1:nrow(boampdataBDD), function(x) {
+    paste0(sample(c(LETTERS, 0:9), 10, replace = TRUE), collapse = "")
+})
+```
+
+## Recodage des variables
+```{r setup}
+boampdataBDD <- boampdataBDD %>%
+  mutate (Commanditaire = nomacheteur)
+
+# Transformer la colonne "texte" en texte
+boampdataBDD$Commanditaire <- tolower(stri_trans_general(boampdataBDD$Commanditaire, "Latin-ASCII"))
+boampdataBDD$Commanditaire <- gsub("\\.", "",boampdataBDD$Commanditaire)
+boampdataBDD$Commanditaire <- gsub("\\-", "",boampdataBDD$Commanditaire)
+boampdataBDD$Commanditaire <- gsub("\\/", " ",boampdataBDD$Commanditaire)
+
+categoriser_administrations <- function(Commanditaire) {
+  if (grepl("centre national de la fonction publique territoriale  cnfpt   11  delegation regionale limousin", Commanditaire, ignore.case = TRUE)) {
+    return("Centre de recherche / Enseignement / CHU")
+    
+   } else if (grepl("region|regional|region|cr |languedocroussillonmidipyrenees", Commanditaire, ignore.case = TRUE)) {
+    return("Région")
+
+  } else if (grepl("opca", Commanditaire, ignore.case = TRUE)) {
+    return("Caisse nationale (CAF, CNAF, CNAM, etc.)")
+    
+  } else if (grepl("commission europeenne|unicef|union europeenne|unesco|united nations educational", Commanditaire, ignore.case = TRUE)) {
+    return("Supra-national (UE, nations unies)")
+
+  } else if (   grepl("\\bville\\b|agglomeration|commune|ca |com com|pays|cc |casvp|cte|cte|mairie|communaute|metropole|metropole|miquelon|ccas|c.c.a.s|centre communal|com d agglo|artois comm|territoire de la cote ouest|cacp|carene|pole metropolitain nantes stnazaire", Commanditaire, ignore.case = TRUE)) {
+    return("Ville / communauté de communes / Métropole")
+
+  } else if (grepl("ministere|ministere |ministeres|minisitere|ministre|ministeres|minarm|dgfip|sgmap|ditp|dgme|meie|dge|dga|gouvernement|mindef|dir|minefi|meeddat|meeddm|miomcti|injep|bercy|dress|dares|insee|tresor|drassm|dg de la modernisation de l'etat|centre d'analyse strategique|delegation secu circulation routieres|ministeres sante, travail et sport|mae|meddtl|minisreres|minsitere", Commanditaire, ignore.case = TRUE)) {
+    return("Etat central")
+    
+  } else if (grepl("departement|depart|departement|departemental|conseil general|conseil general|territoire de corse|martinique|cdg|cd |cd44|conseil gal|cg|mdph|corse|guyane|cons.|departemental", Commanditaire, ignore.case = TRUE)) {
+    return("Département")
+    
+  } else if (grepl("agence|afd|aeres|agefiph|acse|anru|action logement|ca toulon provence mediterranee|ca senart val de seine|ca pau bearn pyrenees|ca de saintquentinenyvelines|ca de bethune bruay artois lys romane|sante publique france|ars|anact|anct|commission de regulation de l'energie|agce de|cget|ancse|anah|anesm|anses|ansp|autorite|ademe|cdc|caisse des depots|depots|pole emploi|expertise france|inpes|oseo innovation|satt|arene idf", Commanditaire, ignore.case = TRUE)) {
+    return("Agence de l'Etat")
+    
+  } else if (grepl("association|inrs|inpi|inst nat de la propriete industrielle|croix rouge|crf|handicap international|fondation|assoc|asei|oxfam|wwf", Commanditaire, ignore.case = TRUE)) {
+    return("Association / Fondation")
+    
+  } else if (grepl("office francais de la biodiversite|opac |formation|habitat|mixte|musee|c2rp|ugecam|etablissement public|etablissement public|efs|etablissement francais du sang|etablissement francais du sang|d'etudes|smtc|sytral|ineris|syndicat|tisseo|etablt public|gmp|port|syndicat|apagl|voie navigables|gip|franceagrimer|ratp|tcl|eau de paris|epf|grand paris|parc|epadesa|epd|sm|siaap|syctom|centre national du cinema|centre national du livre|sa de gestion des eaux de paris|voies navigables de france|territoire de la polynesie francaise|aftrp|amiens amenagement", Commanditaire, ignore.case = TRUE)) {
+    return("Etablissement public (EPA, EPIC, GIP, syndicat mixte, etc.)")
+
+  } else if (grepl("assemblee nationale|assemblee nationale|senat", Commanditaire, ignore.case = TRUE)) {
+    return("Assemblée Nationale / Sénat")
+    
+  } else if (grepl("comptes|conseil d'etat|conseil detat", Commanditaire, ignore.case = TRUE)) {
+    return("Cour des comptes / Conseil d'Etat")
+    
+  } else if (grepl("caisse|cnaf|ircantec|cpam|cipav|msa|ucanss|urcam|canssm|urssaf|accos|acoss|cnavts|cnsa|caf|ursam|c.a.f|cnam|c.n.a.f|caisse nationale", Commanditaire, ignore.case = TRUE)) {
+    return("Caisse nationale (CAF, CNAF, CNAM, etc.)")
+    
+  } else if (grepl("prefecture|rectorat|prefecture|datar|secretariat general pour|dreal|drjs|dde|sgar|deal|regie|drihl|dre|diren|pnr|sdis|crci|ddcs|ddt|ddaf|dgddi", Commanditaire, ignore.case = TRUE)) {
+    return("Etat deconcentré")
+    
+  } else if (grepl("chu|cirad|ecole|hospitalier|gpm|aphm|hopitaux|hospice|institut national du cancer|hospices|ch le|chi|ira de|inria|ch |hopital|cu |gcs |Universite|chr|cerema|ehpad|cnrs|chu|enseignement|cnfpt|centre national de la fonction publique territoriale", Commanditaire, ignore.case = TRUE)) {
+    return("Centre de recherche / Enseignement / CHU")
+    
+  } else if (grepl("cci|pole|cci", Commanditaire, ignore.case = TRUE)) {
+    return("Chambres consulaires")
+    
+  } else {
+    return("Autre")
+  }
+}
+boampdataBDD$categorie <- sapply(boampdataBDD$Commanditaire, categoriser_administrations)
+table(boampdataBDD$categorie)
+table(boampdataBDD$Groupe_commanditaires)
+
+# Faire des regroupements plus hauts
+boampdataBDD <- boampdataBDD %>%
+    mutate(Groupe_commanditaires = case_when(
+    categorie %in% c("Agence de l'Etat","Assemblée Nationale / Sénat","Caisse nationale (CAF, CNAF, CNAM, etc.)","Cour des comptes / Conseil d'Etat","Etat central","Etat deconcentré") ~ "Etat",
+    categorie %in% c("Département","Région","Ville / communauté de communes / Métropole") ~ "Collectivités",
+    categorie %in% c("Centre de recherche / Enseignement / CHU","Etablissement public (EPA, EPIC, GIP, syndicat mixte, etc.)") ~ "Etablissements publics", TRUE ~ "Autres_acteurs"
+  ))
+
+#Pour regarder les valeurs non traitées avec les codes département
+# travail <-boampdataBDD %>% POUR 
+#   filter(is.na(Région)) %>%
+#   select(code_departement,Commanditaire)
+
+# Transformer en données géographiques ---- 
+boampdataBDD <- boampdataBDD %>%
+  mutate(Région = case_when(
+    str_detect(code_departement, "01|03|07|15|26|38|42|43|63|69|73|74") ~ "AUVERGNE RHONE ALPES",
+    str_detect(code_departement, "09|11|12|30|31|32|34|46|48|65|66|81|82") ~ "OCCITANIE",
+    str_detect(code_departement, "02|59|60|62|80") ~ "HAUTS DE FRANCE",
+    str_detect(code_departement, "16|17|19|23|24|33|40|47|64|79|86|87") ~ "NOUVELLE AQUITAINE",
+    str_detect(code_departement, "20A|20B|04|05|06|13|83|84|20") ~ "PROVENCE ALPES COTE D AZUR",
+    str_detect(code_departement, "08|10|51|52|54|55|57|67|68|88") ~ "GRAND EST",
+    str_detect(code_departement, "18|28|36|37|41|45") ~ "CENTRE VAL DE LOIRE",
+    str_detect(code_departement, "44|49|53|72|85") ~ "PAYS DE LA LOIRE",
+    str_detect(code_departement, "22|29|35|56") ~ "BRETAGNE",
+    str_detect(code_departement, "75|77|78|91|92|93|94|95") ~ "ILE DE FRANCE",
+    str_detect(code_departement, "14|27|50|61|76") ~ "NORMANDIE",
+    str_detect(code_departement, "21|25|39|58|70|71|89|90") ~ "BOURGOGNE FRANCHE COMTE",
+    str_detect(code_departement, "971|972|973|974|975|976|977") ~ "OUTRE MER")) %>%
+  mutate(Région = ifelse(code_departement == "4", "PROVENCE ALPES COTE D AZUR", Région)) %>%
+  mutate(Région = ifelse(code_departement == "5", "PROVENCE ALPES COTE D AZUR", Région)) %>%
+  mutate(Région = ifelse(code_departement == "6", "PROVENCE ALPES COTE D AZUR", Région)) %>%
+  mutate(Région = ifelse(code_departement == "4", "PROVENCE ALPES COTE D AZUR", Région)) %>%
+  mutate(Région = ifelse(code_departement == "1", "AUVERGNE RHONE ALPES", Région)) %>%
+  mutate(Région = ifelse(code_departement == "3", "AUVERGNE RHONE ALPES", Région)) %>%
+  mutate(Région = ifelse(code_departement == "7", "AUVERGNE RHONE ALPES", Région)) %>%
+  mutate(Région = ifelse(code_departement == "2", "HAUTS DE FRANCE", Région)) %>%
+  mutate(Région = ifelse(code_departement == "8", "GRAND EST", Région)) %>%
+  mutate(Région = ifelse(code_departement == "9", "OCCITANIE", Région))
+  
+boampdataBDD <- boampdataBDD %>%
+  mutate(Région = if_else(is.na(Région),
+                          case_when(
+                            str_detect(Commanditaire, "auvergne|rhonesalpes|ardeche|rhonealpes|rhone alpes|lyon|grenoble|villeurbanne|cg69|venissieux|isere|savoie") ~ "AUVERGNE RHONE ALPES",
+                            str_detect(Commanditaire, "midipyrenees|occitanie|languedoc") ~ "OCCITANIE",
+                            str_detect(Commanditaire, "ile de france|idf|iledefrance|ministere|minisitere|minstere|afd|agence francaise de developpement|assemblee nationale|senat|paris|centre national du livre|dares|drees|expertise france|mae|meddtl|cnfpt") ~ "ILE DE FRANCE",
+                            str_detect(Commanditaire, "champagneardenne|grand est|champagne ardenne|lorraine|alsace|meurtheetmoselle") ~ "GRAND EST",
+                            str_detect(Commanditaire, "picardie|hautsdefrance|lille|pasdecalais") ~ "HAUTS DE FRANCE",
+                            str_detect(Commanditaire, "aquitaine|limousin|poitou|bordeaux|gironde|nouvelleaquitaine") ~ "NOUVELLE AQUITAINE",
+                            str_detect(Commanditaire, "marseille|vaucluse|var|provence|paca|corse") ~ "PROVENCE ALPES COTE D AZUR",
+                            str_detect(Commanditaire, "ademe|pays de la loire|nantes|paysdelaloire") ~ "PAYS DE LA LOIRE",
+                            str_detect(Commanditaire, "normandie|bassenormandie|hautenormandie") ~ "NORMANDIE",
+                            str_detect(Commanditaire, "centre") ~ "CENTRE VAL DE LOIRE",
+                            str_detect(Commanditaire, "bourgogne|franchecomte") ~ "BOURGOGNE FRANCHE COMTE",
+                            str_detect(Commanditaire, "guadeloupe|reunion|martinique|guyane") ~ "OUTRE MER",
+                            str_detect(Commanditaire, "rennes|bretagne") ~ "BRETAGNE",
+                            TRUE ~ NA_character_ # Si aucune des conditions ci-dessus n'est remplie, laissez Région comme NA
+                          ),Région))
+
+# Classer les évaluations ----
+# Impact 
+boampdataBDD <- boampdataBDD %>%
+  mutate(eval_impact = ifelse(grepl("impact", objet, ignore.case = TRUE),1,0))
+table(boampdataBDD$eval_impact)
+
+# AO réglementaires UE
+boampdataBDD <- boampdataBDD %>%
+  mutate(eval_reglementUE = ifelse(grepl("fonds européens|europe|fse|feder|feader|interreg", objet, ignore.case = TRUE),1,0))
+table(boampdataBDD$eval_reglementUE)
+
+# Accord-cadre 
+boampdataBDD <- boampdataBDD %>%
+  mutate(accord_cadre = ifelse(grepl("accord cadre|accord-cadre|bons de commande", objet, ignore.case = TRUE),1,0))
+table(boampdataBDD$accord_cadre)
+
+# EIS 
+boampdataBDD <- boampdataBDD %>%
+  mutate(EIS = ifelse(grepl("Evaluation d'impact sur la santé|(EIS)|Evaluations d'Impact sur la Santé|D'IMPACT SUR LA SANTÉ DU PROJET", objet, ignore.case = TRUE),1,0))
+
+#EIE
+boampdataBDD <- boampdataBDD %>%
+  mutate(EIE = ifelse(grepl("incidences|environnementale", objet, ignore.case = TRUE),1,0))
+table(boampdataBDD$EIE)
+```
+
+
+## Corrections de la base
+Malgré les filtres, certains marchés ne correspondent pas à de l'évaluation / en sont trop éloignés même dans une définition large. Nous effectuons ainsi une suprresion manuelle de ces lignes. 
+```{r message = FALSE}
+boampdataBDD <- boampdataBDD %>%
+  filter(!objet %in% c(
+    "marche a bons de commande mono attributaire d'evaluation des aptitudes manageriales",
+    "accord-cadre pour la formation des cadres de la region bretagne a l'evaluation des personnels et au management",
+    "le present accord-cadre a pour objet l'evaluation et l'analyse de l'impact de l'initiative conjointe de programmation sur la nutrition, jpi hdhl.",
+    "evaluation de l'accord cadre strategique de developpement portant sur les competences, les fonctions et les metiers transversaux 2010-2014",
+    "evaluation de la qualite de 7 plans d'eau de moins de 50 ha du littoral landais - rcpg 2018-2019.accord cadre a bons de commande avec mini et maxi.2 lots",
+    "accord-cadre a bons de commande pour la redaction de decisions de refus d'admission a l'aide sociale a l'enfance suite a evaluation prealable; lieu du marche: paris",
+    "prestations pour l'evaluation d'une arme a letalite reduite generant un faisceau lumineux (ldi).",
+    "etude avec diagnostic sur l'etat de pollution des deux sites du parc et evaluation du cout de depollution a le mans",
+    "91 etudes acoustiques en limite de propriete du cepr et dans son environnement proche et evaluation du niveau d'exposition au bruit des personnels du cepr a orsay",
+    "prestation de service d'insertion professionnelle",
+    "mission d'evaluation de la performance energetique",
+    "realiser et controle des locaux pour la dde des hauts-de-seine",
+    "prestations d'evaluation de potentiels et d'accompagnement a la prise de fonction des managers, experts et chefs de projet.",
+    "23vds0168g - analyses bacteriologiques d'eau a la recherche de legionnelles et autres parametres d'evaluation sanitaire, sur le territoire de la ville et de l'eurometropole de stra",
+    "evaluation des ouvrages de soutenement des routes departementales du departement des pyrenees-atlantiques.",
+    "prestations editoriales et graphiques pour les publications et supports de communication de la direction de la recherche, des etudes, de l'evaluation et des statistiques (drees)",
+    "mesure de criteres qualite sur le reseau tisseo : evaluation par clients mysteres",
+    "mesures d'exposition terminaux petroliers de fos, evaluation du risque d'exposition a laver",
+    "assistance au recrutement et a l'evaluation pour l'etablissement public foncier d'ile-de-france",
+    "impression et livraison livrets evaluation",
+    "evaluation externe ephad duvant et les chartriers a valenciennes",
+    "evaluation du bruit",
+    "evaluation du debit minimum biologique en durance dans le cadre du renouvellement de la concession de la chute de sainte tulle"
+  )) %>%
+  filter(!grepl("entretien individuel|entretien|evaluation professionnelle|evaluations professionnelles|du bruit|eglise|evaluation de la securite|fourniture de progr", objet, ignore.case = TRUE))
+
+#Suppression des non pertinents à partir des noms de titulaires
+boampdataBDD <- boampdataBDD %>%
+  filter(is.na(titulaire) | !titulaire %in% c("BIO GOUJARD", "ACCA", "TRONICO VIGICELL", "Acca,", "ACCA ANVEOL", "Sector","Afnor Certification,", "CIE Dupaquier,", "CLAF,", "AFNOR Certification", "Unité de mobilité d'évaluation Gérontologie,", "CERTIFER", "Forum réfugiés-Cosi", "Acca Alixio Mobilité", "Acca Anveol", "SOIXANTE", "SOCOTEC ENVIRONNEMENT", "DIOT SIACI","Acca Anveol","AFNOR CERTIFICATION","Aria technologies","CERE Institut,","IMPACT MER","CSC Computer Sciences,","NDBD","Kronos New Time","MUNICIPALITE SERVICE,","MSA Services Limousin,MSA Services Limousin,MSA Services Limousin","DIAGWAY","SERVICES PUBLICS LAB","ITGA.","QCS SERVICES","VIGEO EIRIS","FUTURSKILL","Aria technologies,","INSTITUT SCIENTIFIQUE D'HYGIÈNE ET D'ANALYSE,","FORMAT PRO PAYS DE LOIRE,","Acca Anveol,","HOREA COMPETENCES ET FORMATIONS","ACTIFORCES,MORGAN PHILIPS HUDSON","NEUROVASCULAR IMAGING RESEARCH CORE","UPFACTOR","ECO ENERGIE SERVICE,"))
+
+
+#Supprimer les avis rectificatifs 
+boampdataBDD <- boampdataBDD %>%
+    filter(!(etat == "RECTIFICATIF") | is.na(etat))
+```
+
+
+## Suppression des doublons BOAMPDATABDD 
+La base finale contient des doublons dans les intitulés de marchés (variable "objet"). Cependant, deux objets indentiques peuvent impliquer deux marchés différents, puisque des évaluations peuvent être réalisées sous le même intitulé de marché mais à intervalles différents. Cela empêche ainsi toute suppression sur simple critère d'objet identique (=retrait de 1041 lignes). Nous proposons ainsi de supprimer les données 
+
+```{r message = FALSE}
+
+# # Fonction pour vérifier si deux dates sont à moins de 30 jours d'écart
+# est_proche <- function(date1, date2) {
+#     abs(as.numeric(difftime(date1, date2, units = "days"))) <= 30
+# }
+# 
+# # Préparation de vos données avec un identifiant unique pour chaque combinaison objet-date
+# boampdataBDD <- boampdataBDD %>%
+#     mutate(objet_date_id = paste(objet, dateparution, sep = "_"))
+# 
+# # Identification des doublons avec des dates exactement identiques
+# doublons_exactes <- boampdataBDD %>%
+#     group_by(objet, dateparution) %>%
+#     filter(n() > 1)
+# 
+# # Identification des doublons potentiels avec des dates proches
+# doublons_proches <- boampdataBDD %>%
+#     anti_join(doublons_exactes, by = c("objet", "dateparution")) %>%
+#     group_by(objet) %>%
+#     filter(n() > 1) %>%
+#     do({
+#         data = .
+#         combn(nrow(data), 2, function(x) {
+#             pair = data[x, ]
+#             if (est_proche(pair$dateparution[1], pair$dateparution[2])) {
+#                 return(pair)
+#             }
+#         }, simplify = FALSE) %>%
+#         bind_rows()
+#     })
+# 
+# # Fusion des doublons exacts et proches, puis suppression des doublons
+# doublons_a_supprimer <- bind_rows(doublons_exactes, doublons_proches) %>%
+#     distinct(objet_date_id, .keep_all = TRUE)
+# 
+# # Création de la base de données finale sans doublons
+# boampdataBDD_sansdoublon <- boampdataBDD %>%
+#     anti_join(doublons_a_supprimer, by = "objet_date_id")
+# 
+# rm(doublons_a_supprimer, doublons_exactes, doublons_proches)
+# gc()
+
+# Harmoniser les intitulés des marchés (bien le faire qu'à la fin du nettoyage)
+boampdataBDD$objet <- tolower(boampdataBDD$objet)  # Conversion en minuscules
+boampdataBDD$objet <- stri_trans_general(boampdataBDD$objet, "Latin-ASCII")  # Suppression des accents
+boampdataBDD$objet <- gsub(";", " ", boampdataBDD$objet)
+boampdataBDD$objet <- gsub(",", " ", boampdataBDD$objet)
+boampdataBDD$objet <- gsub("\\.", " ", boampdataBDD$objet)
+boampdataBDD$objet <- gsub("\n", " ", boampdataBDD$objet)
+boampdataBDD$objet <- gsub("\r", " ", boampdataBDD$objet)
+boampdataBDD$objet <- gsub("\"", "", boampdataBDD$objet)
+boampdataBDD$objet <- gsub("-", " ", boampdataBDD$objet)
+boampdataBDD$objet <- gsub("_", " ", boampdataBDD$objet)
+boampdataBDD$objet <- gsub("/", " ", boampdataBDD$objet)
+boampdataBDD$objet <- gsub("/", " ", boampdataBDD$objet)
+boampdataBDD$objet <- gsub("\\(", "", boampdataBDD$objet)
+boampdataBDD$objet <- gsub("\\)", "", boampdataBDD$objet)
+
+# Fonction pour vérifier si deux dates sont à moins de 30 jours d'écart
+est_proche <- function(date1, date2) {
+    abs(as.numeric(difftime(date1, date2, units = "days"))) <= 30
+}
+
+# Préparation de vos données avec un identifiant unique pour chaque combinaison objet-date
+boampdataBDD <- boampdataBDD %>%
+    mutate(objet_date_id = paste(objet, dateparution, sep = "_"))
+
+# Identification des doublons avec des dates exactement identiques
+doublons_exactes <- boampdataBDD %>%
+    group_by(objet, dateparution) %>%
+    filter(n() > 1) %>%
+    arrange(desc(is.na(filename))) %>%
+    slice(1)
+
+# Identification des doublons potentiels avec des dates proches
+doublons_proches <- boampdataBDD %>%
+    anti_join(doublons_exactes, by = c("objet", "dateparution")) %>%
+    group_by(objet) %>%
+    filter(n() > 1) %>%
+    do({
+        data = .
+        combn(nrow(data), 2, function(x) {
+            pair = data[x, ]
+            if (est_proche(pair$dateparution[1], pair$dateparution[2])) {
+                return(pair)
+            }
+        }, simplify = FALSE) %>%
+        bind_rows() %>%
+        slice(1)
+    })
+
+# Fusion des doublons exacts et proches
+doublons_a_conserver <- bind_rows(doublons_exactes, doublons_proches) %>%
+    distinct(objet_date_id, .keep_all = TRUE)
+
+# Création de la base de données finale sans doublons
+boampdataBDD <- boampdataBDD %>%
+    anti_join(doublons_a_conserver, by = "objet_date_id") %>%
+    bind_rows(doublons_a_conserver)
+
+rm(doublons_a_conserver, doublons_exactes, doublons_proches, boampdataBDD_sansdoublon)
+gc()
+
+```
+
+
+## Thematiques ETAPE 1 [PYTHON REQUIS]
+Après plusieurs essais (GLOVE, FastTextFR, TR-IDF), nous sommes passés par Python. Le fichier est "BOAMPthemes.ipynb" à ouvrir avec Jupyter Notebook (commande dans le terminal)
+
+
+L'imputation d'une thématique à un objet se fait par la méthode de l'apprentissage semi-supervisée. La méthode consiste à créer une base d'entrainement où les thématiques sont félchées automatiquement par mots clefs, puis à utiliser cette base pour "entrainer" un modèle de classification du langage (tokenisation).
+
+ATTENTION : s'assurer que les identifiants uniques sont bien les mêmes au moment de la jointure de la base python.
+
+```{r setup}
+# Création d'un fichier CSV pour intégration Python avec uniquement les informations utiles 
+
+boampdata_to_export <- boampdataBDD %>%
+  select("id_unique","objet")
+write.csv2(boampdata_to_export, "/Users/paulcotton/Desktop/Archivesmarket/Scrap/Bases pour python/boampdataBDD_reduite.csv",row.names = FALSE)
+```
+## Thematiques ETAPE 2 [IMPORT PYTHON]
+```{r setup}
+thematiquesAO <- read.delim("/Users/paulcotton/Desktop/Archivesmarket/Scrap/Bases pour python/boampdataBDD_final.csv", header = TRUE, sep=";")
+thematiquesAO <- thematiquesAO %>%
+  select(id_unique,categorie_finale)
+
+boampdataBDD <- merge(thematiquesAO, boampdataBDD, by = "id_unique", all.x = TRUE)
+
+SAUVEGARDE <-boampdataBDD
+
+rm(thematiquesAO,boampdata_to_export)
+```
+
+## TRI DES BASES (à la fin du nettoyage)
+```{r message = FALSE}
+#Creation des bases 
+
+TITULAIRES <- boampdataBDD %>%
+  filter(!is.na(titulaire) & titulaire != "" & titulaire != " ")
+
+#Seulements les avis de marchés (pour toute l'analyse)
+boampdataBDD <- anti_join(boampdataBDD, TITULAIRES, by = "id_unique")
+```
+
+## Sauvegarde
+```{r message = FALSE}
+save(boampdataBDD, TITULAIRES, SAUVEGARDE,
+       file = "/Users/paulcotton/Desktop/Archivesmarket/Scrap/Sauvegarde dataset/240122_BDDtravail.Rdata")
+```
+
+
+
+# CARTOGRAPHIES
+
+## Importation de la carte 
+
+```{r message = FALSE}
+regions_sf <- st_read("//Users/paulcotton/Desktop/ShapefileRégions/regions-et-collectivites-doutre-mer-france/georef-france-region-millesime.shp") %>%
+  filter(reg_name_up != "GUYANNE" & reg_name_up != "MARTINIQUE"& reg_name_up != "MARTINIQUE"& reg_name_up != "GUYANE"& reg_name_up != "LA REUNION"& reg_name_up != "CORSE"& reg_name_up != "MAYOTTE"& reg_name_up != "GUADELOUPE")
+```
+
+## Carte des régions( AO par régions)
+```{r message = FALSE}
+region_boampcarte <- boampdataBDD %>%
+  group_by(Région) %>%
+  summarize(Count = n())
+
+
+
+regions_sfxcarte <- left_join(regions_sf, region_boampcarte, by = c("reg_name_up" = "Région"))
+
+ggplot(data = regions_sfxcarte, aes(fill = Count)) +
+  geom_sf() +
+  geom_sf_text(aes(label = reg_name_up), size = 3, color = "black", position = position_dodge(width = 0.9), vjust = -1) +
+  ma_palette +
+  geom_sf_text(aes(label = Count), size = 3, color = "black", fontface = "bold", position = position_dodge(width = 0.9)) +
+  theme_minimal() +
+  labs(title = "Nombre d'AO d'évaluation par région (2006-2023)",
+       subtitle = "N=7438",
+    caption = "source : auteur, à partir des données du BOAMP")+
+  labs(x = NULL, y = NULL,fill = "Nombre d'AO")
+
+# Nregion <- boampdataBDD %>%
+#   filter(!is.na(Région)) # pour calcul du N=
+
+```
+
+## Analyse par régions 
+```{r message = FALSE}
+#évolution anuelle par région 
+categories_aggregated <- boampdataBDD %>%
+  group_by(Région, categorie, ANNEE_Parution) %>%
+  summarize(Count = n()) %>%
+  ungroup()
+
+BDDanreg <- left_join(regions_sf, categories_aggregated, by = c("reg_name_up" = "Région"))
+
+total_by_region_year <- BDDanreg %>%
+  group_by(reg_name_up, ANNEE_Parution) %>%
+  summarize(TotalCount = sum(Count))
+
+# Créez un graphique en courbes avec les totaux par région et par année
+ggplot(data = total_by_region_year, aes(x = ANNEE_Parution, y = TotalCount, color = reg_name_up, group = reg_name_up)) +
+  geom_line(size = 1) +
+  scale_color_viridis_d() +
+  facet_wrap(~reg_name_up, scales = "fixed", ncol = 3) +
+  theme_minimal() +
+  labs(title = "Répartition des AO d'évaluation de politiques\npubliques par région et par année (2006-2023)",
+       caption = "source : auteur, à partir des données BOAMP",
+       y = "Nombre d'AO",
+       x = "Année de parution")+
+    theme(legend.position = "none") + 
+    geom_vline(xintercept = c("2013","2016"), linetype = "dashed", colour = "red") +
+  ggplot2::annotate("text", x = "2010", y = 140, label = "expansion",colour = "red", size=2) +
+  ggplot2::annotate("text", x = "2014", y = 140, label = "contraction",colour = "red", size=2) +
+  ggplot2::annotate("text", x = "2019", y = 140, label = "stabilisation",colour = "red", size=2)+
+    scale_x_discrete(breaks = unique(total_by_region_year$ANNEE_Parution)[seq(1, length(unique(total_by_region_year$ANNEE_Parution)), by = 2)])
+```
+
+```{r message = FALSE}
+#vision commanditaires par région 
+Zoom3regions <- boampdataBDD %>%
+  group_by(Région, Groupe_commanditaires) %>%
+  summarize(Count = n()) %>%
+  filter(Région %in% c("AUVERGNE RHONE ALPES", "ILE DE FRANCE", "NOUVELLE AQUITAINE"))%>%
+  ungroup() %>%
+  group_by(Région) %>%
+  mutate(TotalPerRegion = sum(Count)) %>%
+  ungroup()
+
+Zoom3regions <- Zoom3regions %>%
+  mutate(Région = factor(Région, levels = c("ILE DE FRANCE", "AUVERGNE RHONE ALPES", "NOUVELLE AQUITAINE"))) %>%
+  arrange(Région, Groupe_commanditaires) %>%
+  mutate(Percentage = Count / TotalPerRegion) %>%
+  ungroup()
+
+Zoom3regions <- Zoom3regions %>%
+  group_by(Région) %>%
+  mutate(RegionTotal = paste(Région, "\n(N=", TotalPerRegion,")")) %>%
+  ungroup()
+
+ggplot(Zoom3regions, aes(x="", y=Percentage, fill=Groupe_commanditaires)) +
+  geom_bar(stat="identity", position="fill") +
+  geom_text(aes(label = sprintf("%.1f%%", Percentage*100), y =Count), 
+            position = position_fill(vjust = 0.5), size = 3, color = "white")+
+  facet_wrap(~ RegionTotal) +
+  scale_fill_manual(values = colorsgroup) +
+  theme_minimal() +  # Utilise theme_minimal pour un meilleur rendu
+  scale_y_continuous(labels = scales::percent_format()) +  # Formatage en pourcentage pour l'axe Y
+  labs(x=NULL, y="Pourcentage", fill="Groupe commanditaires", 
+       title="Groupe de commanditaires par région (2006-2023)",
+       subtitle = "Uniquement les trois régions avec le plus d'AO publiés",
+       caption = "source : auteur, à partir des données BOAMP") +
+  theme(legend.position = "right")
+
+
+# Même chose mais évolution par années (ANNEXES)
+Zoom3regions <- boampdataBDD %>%
+  group_by(Région, Groupe_commanditaires, ANNEE_Parution) %>%
+  summarize(Count = n(), .groups = 'drop') %>%
+  filter(Région %in% c("AUVERGNE RHONE ALPES", "ILE DE FRANCE", "NOUVELLE AQUITAINE")) %>%
+  group_by(Région, ANNEE_Parution) %>%
+  mutate(TotalPerYear = sum(Count)) %>%
+  ungroup() %>%
+  mutate(Percentage = Count / TotalPerYear)
+
+Zoom3regions$ANNEE_Parution <- as.numeric(as.character(Zoom3regions$ANNEE_Parution))
+
+ggplot(Zoom3regions, aes(x=ANNEE_Parution, y=Percentage, group=Groupe_commanditaires, color=Groupe_commanditaires)) +
+  geom_line() +
+  geom_point() +  # Ajoute des points sur les lignes
+  facet_wrap(~ Région) +
+  scale_color_manual(values = colorsgroup) +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_x_continuous(breaks = seq(min(Zoom3regions$ANNEE_Parution), max(Zoom3regions$ANNEE_Parution), by = 2)) +
+  labs(x="Année de parution", y="Pourcentage", color="Groupe commanditaires", 
+       title="Évolution Année par Année des Groupe de Commanditaires par Région",
+       subtitle = "Uniquement les trois régions avec le plus d'AO publiés",
+       caption = "source : auteur, à partir des données BOAMP") +
+  theme(legend.position = "bottom")
+
+rm(Zoom3regions, total_by_region_year)
+```
+
+## Analyse régions catergories commanditaires (=total)
+```{r message = FALSE}
+Zoom3regionscat <- boampdataBDD %>%
+  group_by(Région, categorie, ANNEE_Parution) %>%
+  summarize(Count = n(), .groups = 'drop') %>%
+  filter(Région %in% c("AUVERGNE RHONE ALPES", "ILE DE FRANCE", "NOUVELLE AQUITAINE")) %>%
+  group_by(Région, ANNEE_Parution) %>%
+  mutate(TotalPerYear = sum(Count)) %>%
+  ungroup() %>%
+  mutate(Percentage = Count / TotalPerYear)
+
+Zoom3regionscat$ANNEE_Parution <- as.numeric(as.character(Zoom3regionscat$ANNEE_Parution))
+
+ggplot(Zoom3regionscat, aes(x=ANNEE_Parution, y=Percentage, group=categorie, color=categorie)) +
+  geom_smooth(method = "loess", se = FALSE)+
+  facet_wrap(~ Région, ncol = 1, scales = "free_y") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format()) +
+  scale_x_continuous(breaks = seq(min(Zoom3regionscat$ANNEE_Parution), max(Zoom3regionscat$ANNEE_Parution), by = 2)) +
+  labs(x="Année de parution", y="Pourcentage", color="Commanditaires", 
+       title="Évolution Année par Année des Groupe de Commanditaires par Région",
+       subtitle = "Uniquement les trois régions avec le plus d'AO publiés",
+       caption = "source : auteur, à partir des données BOAMP") +
+  theme(legend.position = "right")
+  
+  
+  # ggplot(Zoom3regionscat, aes(x=ANNEE_Parution, y=Percentage, group=categorie, color=categorie)) +
+  # geom_line() +
+  # geom_point() +  # Ajoute des points sur les lignes
+  # facet_wrap(~ Région, ncol = 1) +
+  # scale_color_manual(values = colorsdegrad) +
+  # theme_minimal() +
+  # scale_y_continuous(labels = scales::percent_format()) +
+  # scale_x_continuous(breaks = seq(min(Zoom3regionscat$ANNEE_Parution), max(Zoom3regionscat$ANNEE_Parution), by = 2)) +
+  # labs(x="Année de parution", y="Pourcentage", color="Commanditaires", 
+  #      title="Évolution Année par Année des Groupe de Commanditaires par Région",
+  #      subtitle = "Uniquement les trois régions avec le plus d'AO publiés",
+  #      caption = "source : auteur, à partir des données BOAMP") +
+  # theme(legend.position = "right")
+
+# Sans les % 
+ggplot(Zoom3regionscat, aes(x = ANNEE_Parution, y = Percentage, fill = categorie)) +
+  geom_bar(stat = "identity") +
+  facet_wrap(~ Région, ncol = 1, scales = "free_y") +
+  theme_minimal() +
+  scale_y_continuous(labels = percent_format()) +
+  scale_x_continuous(breaks = seq(min(Zoom3regionscat$ANNEE_Parution), max(Zoom3regionscat$ANNEE_Parution), by = 1)) +
+  labs(x = "Année de parution", y = "Pourcentage", fill = "Commanditaires",
+       title = "Évolution Année par Année des Groupe de Commanditaires par Région",
+       subtitle = "Uniquement les trois régions avec le plus d'AO publiés",
+       caption = "source : auteur, à partir des données BOAMP") +
+  theme(legend.position = "right")
+
+# Avec les % 
+Zoom3regionscat <- Zoom3regionscat %>%
+  group_by(ANNEE_Parution, Région) %>%
+  arrange(ANNEE_Parution, Région, categorie) %>%
+  mutate(cum_percentage = cumsum(Percentage)) %>%
+  ungroup()
+
+# Création de l'histogramme avec étiquettes
+ggplot(Zoom3regionscat, aes(x = ANNEE_Parution, y = Percentage, fill = categorie)) +
+  geom_bar(stat = "identity") +
+    geom_text(aes(label = sprintf("%.0f%%", Percentage*100)), 
+            position = position_fill(vjust = 0.5), 
+            size = 1.5,
+            color = "white",
+            check_overlap = TRUE) +
+  facet_wrap(~ Région, ncol = 1, scales = "free_y") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  scale_x_continuous(breaks = seq(min(Zoom3regionscat$ANNEE_Parution), max(Zoom3regionscat$ANNEE_Parution), by = 2)) +
+  labs(x = "Année de parution", y = "Pourcentage", fill = "Commanditaires",
+       title = "Évolution des commanditaires pour chacune des trois régions\navec le plus d'appels d'offre publiés",
+       caption = "source : auteur, à partir des données BOAMP") +
+  theme(legend.position = "right")+
+    scale_y_continuous(labels = scales::percent_format(scale = 100)) # Ajustement de l'échelle y
+
+
+
+# La meme par groupe 
+Zoom4regionscat <- boampdataBDD %>%
+  group_by(Région, Groupe_commanditaires, ANNEE_Parution) %>%
+  summarize(Count = n(), .groups = 'drop') %>%
+  filter(Région %in% c("AUVERGNE RHONE ALPES", "ILE DE FRANCE", "NOUVELLE AQUITAINE")) %>%
+  group_by(Région, ANNEE_Parution) %>%
+  mutate(TotalPerYear = sum(Count)) %>%
+  ungroup() %>%
+  mutate(Percentage = Count / TotalPerYear)
+
+Zoom4regionscat$ANNEE_Parution <- as.numeric(as.character(Zoom4regionscat$ANNEE_Parution))
+
+# Avec les % 
+Zoom4regionscat <- Zoom4regionscat %>%
+  group_by(ANNEE_Parution, Région) %>%
+  arrange(ANNEE_Parution, Région, Groupe_commanditaires) %>%
+  mutate(cum_percentage = cumsum(Percentage)) %>%
+  ungroup()
+
+# Création de l'histogramme avec étiquettes
+ggplot(Zoom4regionscat, aes(x = ANNEE_Parution, y = Percentage, fill = Groupe_commanditaires)) +
+  geom_bar(stat = "identity") +
+    geom_text(aes(label = sprintf("%.0f%%", Percentage*100)), 
+            position = position_fill(vjust = 0.5), 
+            size = 1.5,
+            color = "white",
+            check_overlap = TRUE) +
+  facet_wrap(~ Région, ncol = 1, scales = "free_y") +
+  theme_minimal() +
+  scale_y_continuous(labels = scales::percent_format(scale = 1)) +
+  scale_x_continuous(breaks = seq(min(Zoom3regionscat$ANNEE_Parution), max(Zoom3regionscat$ANNEE_Parution), by = 2)) +
+  labs(x = "Année de parution", y = "Pourcentage", fill = "Commanditaires",
+       title = "Évolution des groupes de commanditaires pour chacune des trois régions\navec le plus d'appels d'offre publiés",
+       caption = "source : auteur, à partir des données BOAMP") +
+  theme(legend.position = "right")+
+  scale_fill_manual(values = colorsgroup)+
+    scale_y_continuous(labels = scales::percent_format(scale = 100)) # Ajustement de l'échelle y
+
+```
+
+
+## PHASE 2 (2013-2016) contraction
+```{r setup, include=FALSE}
+trends <- Zoom3regionscat %>%
+  filter(ANNEE_Parution >= 2013 & ANNEE_Parution <= 2016) %>%
+  group_by(Région, categorie) %>%
+  summarize(Start = first(Percentage), End = last(Percentage), .groups = 'drop') %>%
+  mutate(Tendance = ifelse(End > Start, "Augmentation", "Diminution"))
+
+# Transformer les données en format large pour créer un tableau
+trends_table <- trends %>%
+  select(Région, categorie, Tendance) %>%
+  pivot_wider(names_from = Région, values_from = Tendance)
+
+# Afficher le tableau
+print(trends_table)
+
+# Créer un tableau formaté avec kable
+kable(trends_table, "html") %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(1, bold = TRUE)
+
+# Fonction pour le formatage des cellules
+format_tendance <- function(tendance, categorie) {
+  ifelse(tendance == "Augmentation",
+         cell_spec(paste("\u2191"), "html", color = "green", extra_css = "font-weight: bold;"),  # Flèche vers le haut pour augmentation
+         cell_spec(paste("\u2193"), "html", color = "red", extra_css = "font-weight: bold;"))  # Flèche vers le bas pour diminution
+}
+
+# Calcul des tendances depuis 2013 pour chaque catégorie dans chaque région
+trends <- Zoom3regionscat %>%
+  filter(ANNEE_Parution >= 2013 & ANNEE_Parution <= 2016) %>%
+  group_by(Région, categorie) %>%
+  summarize(Start = first(Percentage), End = last(Percentage), .groups = 'drop') %>%
+  mutate(Tendance = ifelse(End > Start, "Augmentation", "Diminution"))
+
+# Transformer les données en format large pour créer un tableau
+trends_table <- trends %>%
+  select(Région, categorie, Tendance) %>%
+  pivot_wider(names_from = Région, values_from = Tendance)
+
+# Appliquer le formatage au tableau
+trends_table_formatted <- trends_table %>%
+  mutate(across(-categorie, ~format_tendance(.x, categorie)))
+
+# Créer le tableau formaté avec kable
+kable(trends_table_formatted, "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE) %>%
+  add_header_above(c("Phase 2 - Contraction (2013 - 2016)" = ncol(trends_table_formatted))) %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+## PHASE 1  tendances AVANT 2013 pour chaque catégorie dans chaque région
+```{r setup, include=FALSE}
+# Calcul des tendances de 2007 à 2013 pour chaque catégorie dans chaque région
+trends_2007_2013 <- Zoom3regionscat %>%
+  filter(ANNEE_Parution >= 2007 & ANNEE_Parution <= 2013) %>%
+  group_by(Région, categorie) %>%
+  summarize(Start = first(Percentage), End = last(Percentage), .groups = 'drop') %>%
+  mutate(Tendance = ifelse(End > Start, "Augmentation", "Diminution"))
+
+# Transformer les données en format large pour créer un tableau
+trends_table_2007_2013 <- trends_2007_2013 %>%
+  select(Région, categorie, Tendance) %>%
+  pivot_wider(names_from = Région, values_from = Tendance)
+
+# Fonction pour le formatage des cellules
+format_tendance <- function(tendance, categorie) {
+  ifelse(tendance == "Augmentation",
+         cell_spec(paste("\u2191"), "html", color = "green", extra_css = "font-weight: bold;"),  # Flèche vers le haut pour augmentation
+         cell_spec(paste("\u2193"), "html", color = "red", extra_css = "font-weight: bold;"))  # Flèche vers le bas pour diminution
+}
+
+# Appliquer le formatage au tableau
+trends_table_formatted_2007_2013 <- trends_table_2007_2013 %>%
+  mutate(across(-categorie, ~format_tendance(.x, categorie)))
+
+# Créer le tableau formaté avec kable
+kable(trends_table_formatted_2007_2013, "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),full_width = FALSE) %>%
+    add_header_above(c("Phase 1 - Expansion (2007 - 2013)" = ncol(trends_table_formatted))) %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+## PHASE 3 des tendances APRES 2016 pour chaque catégorie dans chaque région
+```{r setup, include=FALSE}
+# Calcul des tendances de 2007 à 2013 pour chaque catégorie dans chaque région
+trends_2016_2023 <- Zoom3regionscat %>%
+  filter(ANNEE_Parution >= 2016) %>%
+  group_by(Région, categorie) %>%
+  summarize(Start = first(Percentage), End = last(Percentage), .groups = 'drop') %>%
+  mutate(Tendance = ifelse(End > Start, "Augmentation", "Diminution"))
+
+# Transformer les données en format large pour créer un tableau
+trends_2016_2023 <- trends_2016_2023 %>%
+  select(Région, categorie, Tendance) %>%
+  pivot_wider(names_from = Région, values_from = Tendance)
+
+# Fonction pour le formatage des cellules
+format_tendance <- function(tendance, categorie) {
+  ifelse(tendance == "Augmentation",
+         cell_spec(paste("\u2191"), "html", color = "green", extra_css = "font-weight: bold;"),  # Flèche vers le haut pour augmentation
+         cell_spec(paste("\u2193"), "html", color = "red", extra_css = "font-weight: bold;"))  # Flèche vers le bas pour diminution
+}
+
+# Appliquer le formatage au tableau
+trends_table_formatted_2016_2023 <- trends_2016_2023 %>%
+  mutate(across(-categorie, ~format_tendance(.x, categorie)))
+
+# Créer le tableau formaté avec kable
+kable(trends_table_formatted_2016_2023, "html", escape = FALSE) %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),full_width = FALSE) %>%
+    add_header_above(c("Phase 3 - Stabilisation (2016-2023)" = ncol(trends_table_formatted_2016_2023))) %>%
+  row_spec(0, bold = TRUE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+
+# SCHEMAS 
+
+##Evolution globale par années 
+```{r setup, include=FALSE}
+# NB AO par années
+boampdataBDDan <- boampdataBDD %>%
+  # filter(nature_libelle != "Résultat de marché"  |is.na(nature_libelle)) %>%
+  group_by(ANNEE_Parution) %>%
+  summarize(Count = n()) %>%
+  ungroup()
+
+boampdataBDDan$ANNEE_Parution <- as.numeric(as.character(boampdataBDDan$ANNEE_Parution))
+
+ggplot(boampdataBDDan, aes(x=ANNEE_Parution, y=Count, group=1)) +
+  geom_line() +
+  geom_point(size = 3, colour = "blue") +
+  geom_vline(xintercept = c(2013,2016), linetype = "dashed", colour = "red") +
+  ggplot2::annotate("text", x = 2010, y = 100, label = "phase 1 \nexpansion", colour = "red")+
+  ggplot2::annotate("text", x = 2014, y = 100, label = "phase 2 \ncontraction",colour = "red") +
+  ggplot2::annotate("text", x = 2019, y = 100, label = "phase 3 \nstabilisation",colour = "red") +
+  geom_text_repel(aes(label=Count),
+                  nudge_y = 0.09,    # Ajuste légèrement les étiquettes vers le haut
+                  point.padding = 0.5) +  # Ajoute un peu d'espace autour des points
+  labs(title="Nombre d'appels d'offre d'évaluation de politique publique par année de parution",
+       subtitle = "N=7438",
+       x="Année de parution", y="Nombre d'appels d'offre",
+       caption = "source : auteur, à partir des données BOAMP") +
+  theme_minimal()+  scale_x_continuous(breaks = unique(boampdataBDDan$ANNEE_Parution))
+
+rm(boampdataBDDan)
+
+# NB AO par type de commanditaire (catégorie aggrégée)
+boampdataBDDancom <- boampdataBDD %>%
+  group_by(Groupe_commanditaires) %>%
+  summarize(Count = n()) %>%
+  ungroup()
+
+total_count <- sum(boampdataBDDancom$Count)
+# Ajout d'une colonne pour le pourcentage
+
+boampdataBDDancom <- boampdataBDDancom %>%
+  mutate(Pourcentage = (Count / total_count) * 100)
+rm(boampdataBDDancom)
+```
+
+## AO par an par famille commanditaires
+```{r setup}
+boampdataBDDancoman <- boampdataBDD %>%
+  group_by(Groupe_commanditaires, ANNEE_Parution) %>%
+  summarize(Count = n()) %>%
+  ungroup()
+
+ggplot(boampdataBDDancoman, aes(x=ANNEE_Parution, y=Count, group=Groupe_commanditaires, colour=Groupe_commanditaires)) +
+  geom_line() +
+  geom_point() +
+  geom_text_repel(aes(label=Count), nudge_y = 0.05, point.padding = 0.3) +
+  labs(title="Nombre d'appels d'offre par groupe de commanditaires et année de parution (2006-2023)",
+       subtitle = "N=7438",
+       x="Année de parution", y="Nombre d'appels d'offre",
+       caption = "source : auteur, à partir de l'extraction API BOAMP") +
+  theme_minimal()+
+    scale_colour_manual(values = colorsgroup)
+```
+
+## Marchés européenns 
+```{r setup}
+# Analyse des appels d'offre UE 
+marcheUE <- boampdataBDD %>%
+  filter(eval_reglementUE == 1)
+
+categories_aggregated_UE <- marcheUE %>%
+  group_by(ANNEE_Parution) %>%
+  summarize(Count = n(), .groups = "drop")
+
+#Histograme 
+ggplot(categories_aggregated_UE, aes(x=ANNEE_Parution, y=Count)) +
+  # Utilisation d'une couleur bleue pour les barres
+  geom_bar(stat="identity", position="stack", fill="#0033A0") + # Bleu de l'UE
+  # Ajout des étiquettes pour chaque barre
+  geom_text(aes(label=Count), vjust=-0.5, size=3.5) +
+  labs(title="Nombre d'AO évaluation de fonds européens par année",
+       x="Année de parution", y="Nombre d'appels d'offre",
+       caption = "source : auteur, à partir de l'extraction API BOAMP") +
+  theme_minimal()
+
+categories_aggregated_UE <- marcheUE %>%
+  group_by(ANNEE_Parution, Groupe_commanditaires) %>%
+  summarize(Count = n(), .groups = "drop")
+# Calculer le total pour chaque année
+total_per_year <- categories_aggregated_UE %>%
+  group_by(ANNEE_Parution) %>%
+  summarize(Total = sum(Count), .groups = "drop")
+
+ggplot(categories_aggregated_UE, aes(x = ANNEE_Parution, y = Count, fill = Groupe_commanditaires)) +
+  geom_bar(stat = "identity", position = "stack") +
+  labs(title = "Nombre d'AO évaluation de fonds européens \n par année et par groupe de commanditaires",
+       x = "Année de parution", y = "Nombre d'appels d'offre",
+       caption = "source : auteur, à partir de l'extraction API BOAMP") +
+  theme_minimal()+  scale_fill_manual(values = colorsgroup)
+
+
+table(boampdataBDD$eval_reglementUE)
+
+# Tracer l'histogramme empilé
+ggplot(categories_aggregated_UE, aes(x = ANNEE_Parution, y = Count, fill = Groupe_commanditaires)) +
+  geom_bar(stat = "identity", position = "stack")+
+  labs(
+    title = "Nombre d'AO évaluation de fonds européens par année et par groupe de commanditaires",
+    subtitle = "N=516",
+    x = "Année de parution", 
+    y = "Nombre d'appels d'offre",
+    caption = "source : auteur, à partir de l'extraction API BOAMP"
+  ) +
+  theme_minimal() +
+  scale_fill_manual(values = colorsgroup)+
+  geom_text(aes(label = Count), position = position_stack(vjust = 0.5), color = "white")
+
+```
+
+
+## EIE 
+
+```{r setup}
+EIE <- boampdataBDD %>%
+  group_by(ANNEE_Parution, Groupe_commanditaires) %>%
+  summarize(Total_EIE = n(),
+            EIE = sum(EIE),
+            Pourc_impact = (EIE / Total_EIE)*100) %>%
+  ungroup() %>%
+   filter(EIE != 0) #retirer ça aussi pour retrouver le graphique d'avant
+
+
+EIE <- EIE %>% arrange(Groupe_commanditaires, ANNEE_Parution)
+
+ggplot(EIE, aes(x = as.numeric(ANNEE_Parution), y = EIE, fill = Groupe_commanditaires)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(aes(label = EIE), position = position_stack(vjust = 0.5), color = "white",size=3) +
+  scale_fill_manual(values = colorsgroup) +
+  scale_x_continuous(breaks = seq(min(EIE$ANNEE_Parution), max(EIE$ANNEE_Parution), by = 1)) +
+  labs(title = "Nombre d'appels d'offre EIE par an (2006-2023)",
+       subtitle = "N=1018",
+       x = "Année de parution",
+       y = "Nombre d'appels d'offre",
+       caption = "Source : auteur, à partir des données BOAMP") +
+  theme_minimal()
+
+table(boampdataBDD$EIE)
+
+```
+
+## Sans EIE et UE 
+```{r setup}
+
+boampdataBDDancoman <- boampdataBDD %>%
+  group_by(Groupe_commanditaires, ANNEE_Parution) %>%
+  summarize(
+    Count = n(),
+    Count_nonReglementaire = sum(ifelse(eval_reglementUE == 1 | EIE == 1, 0, 1)),
+  ) %>%
+  ungroup()
+
+
+# Création du graphique
+ggplot() +
+    geom_text_repel(
+    data = boampdataBDDancoman, 
+    aes(x = ANNEE_Parution, y = Count_nonReglementaire, label = Count_nonReglementaire, group = Groupe_commanditaires, colour = Groupe_commanditaires), nudge_y = 0.3,  # Ajuster selon les besoins
+    point.padding = 0.3,
+    box.padding = 0.3,
+    size = 3) +
+  geom_vline(xintercept = c("2013","2016"), linetype = "dashed", colour = "red") +
+  geom_vline(xintercept = c("2011"), linetype = "dashed", colour = "grey") +
+
+    ggplot2::annotate("text", x = "2010", y = 400, label = "phase 1 \nexpansion", colour = "red")+
+  ggplot2::annotate("text", x = "2014", y = 400, label = "phase 2 \ncontraction",colour = "red") +
+  ggplot2::annotate("text", x = "2019", y = 400, label = "phase 3 \nstabilisation",colour = "red") +
+  geom_line(data = boampdataBDDancoman, aes(x = ANNEE_Parution, y = Count, group = Groupe_commanditaires, colour = Groupe_commanditaires), linetype = "dotted") +
+  geom_line(data = boampdataBDDancoman, aes(x = ANNEE_Parution, y = Count_nonReglementaire, group = Groupe_commanditaires, colour = Groupe_commanditaires), linetype = "solid") +
+  geom_point(data = boampdataBDDancoman, aes(x = ANNEE_Parution, y = Count_nonReglementaire, group = Groupe_commanditaires, colour = Groupe_commanditaires)) +
+  labs(title="Nombre d'AO par groupe de commanditaires et année hors évaluations réglementaires",
+       subtitle = "(Total d'AO rappelé en lignes pointillées)",
+       x="Année de parution", y="Nombre d'appels d'offre",
+       caption = "source : auteur, à partir de l'extraction API BOAMP") +
+  theme_minimal()+scale_color_manual(values = colorsgroup)
+```
+
+
+
+## Détail plus fin des commanditaires d'évaluations
+```{r setup}
+# Bases de données de travail 
+categories_aggregated_an <- boampdataBDD %>%
+  group_by(Région, Groupe_commanditaires, categorie, ANNEE_Parution) %>%
+  summarize(Count = n()) %>%
+  ungroup()
+
+BDD1 <- categories_aggregated_an %>%
+  group_by(categorie, Groupe_commanditaires) %>%
+  summarize(TotalCount = sum(Count)) %>%
+  ungroup() %>%
+  mutate(categorie = reorder(categorie, -TotalCount)) %>%
+  arrange(desc(TotalCount))
+
+BDD2 <- categories_aggregated_an %>%
+  group_by(categorie, Groupe_commanditaires,ANNEE_Parution) %>%
+  summarize(TotalCount = sum(Count)) %>%
+  ungroup() %>%
+  mutate(categorie = reorder(categorie, -TotalCount))%>%
+  arrange(TotalCount)
+# Calculer le total de chaque année
+totals_by_year <- aggregate(TotalCount ~ ANNEE_Parution, data = BDD2, sum)
+
+         
+# Hist. Données générales par commanditaires et par groupes de commanditaires
+ggplot(data = BDD1, aes(x = categorie, y = TotalCount, fill = Groupe_commanditaires))+
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = TotalCount), hjust = -0.1, nudge_y = -0.5) +
+  coord_flip() +
+  scale_fill_manual(values = colorsgroup) +
+  labs(title = "Nombre total d'appels d'offre par categorie de commanditaire (2006-2023)",
+    x = "", y = "Nombre", fill = "Groupe_commanditaires",caption = "source : auteur, à partir de l'extraction API BOAMP", subtitle = "N=7438") +
+  theme_minimal()+
+    scale_y_continuous(limits = c(0, 2000))
+
+
+# Choroplèthe.Groupe de commanditaires 
+ggplot(data = BDD2, aes(x = 1, y = TotalCount, fill = Groupe_commanditaires)) +
+  geom_bar(stat = "identity") +
+  coord_polar(theta = "y") +  # Créez un graphique circulaire empilé
+  scale_fill_viridis_d() +
+  theme_minimal()+
+  scale_fill_manual(values = colorsgroup)+
+  facet_wrap(~ANNEE_Parution, ncol = 5) +  # Facettes par année (vous pouvez ajuster le nombre de colonnes)
+    labs(title = "Répartition des AO d'évaluation par \ngroupes de commanditaires et par an (2006-2023)",
+      subtitle = "Au centre, la valeur totale de l'année",
+       caption = "source : auteur, à partir des données BOAMP")+
+   theme(axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
+scale_y_continuous(breaks = seq(0, 1000, by = 200),
+                     labels = seq(0, 1000, by = 200)) +
+      labs(fill = "Groupe de commanditaires") + 
+    geom_text(data = totals_by_year, aes(label = paste(TotalCount), x = 0, y = 0), 
+            position = position_stack(vjust = 0), , size = 2.5, inherit.aes = FALSE)+
+    theme(axis.text.x = element_text(size = 7,color = "darkgray"))
+
+#le meme mais commanditaires
+my_colorss <- c(
+  "#d73027",  # Rouge orangé
+  "#fc8d59",  # Saumon
+  "#fee090",  # Jaune sable
+  "#e0f3f8",  # Bleu ciel très clair
+  "#91bfdb",  # Bleu moyen
+  "#4575b4",  # Bleu foncé
+  "#313695",  # Bleu outremer
+  "#a6d96a",  # Vert clair
+  "#66bd63",  # Vert moyen
+  "#1a9850",  # Vert foncé
+  "#006837",  # Vert émeraude
+  "#fdae61",  # Orange clair
+  "#f46d43",  # Orange moyen
+  "#abdda4",  # Vert menthe
+  "#74add1"   # Bleu azur
+)
+
+ggplot(data = BDD2, aes(x = 1, y = TotalCount, fill = categorie)) +
+  geom_bar(stat = "identity") +
+  coord_polar(theta = "y") +  # Créez un graphique circulaire empilé
+  theme_minimal()+
+  # scale_fill_viridis(discrete = TRUE)+  # Utilisez Viridis pour les couleurs
+  scale_fill_manual(values = my_colorss)+
+  facet_wrap(~ANNEE_Parution, ncol = 5) +  # Facettes par année (vous pouvez ajuster le nombre de colonnes)
+    labs(title = "Répartition des AO d'évaluation par groupes de commanditaires et par an (2006-2023)",
+      subtitle = "Au centre, la valeur totale de l'année",
+       caption = "source : auteur, à partir des données BOAMP",
+      y = " ",
+      x = " ")+
+   theme(axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
+scale_y_continuous(breaks = seq(0, 1000, by = 200),
+                     labels = seq(0, 1000, by = 200)) +
+      labs(fill = "categorie") + 
+    geom_text(data = totals_by_year, aes(label = paste(TotalCount), x = 0, y = 0), 
+            position = position_stack(vjust = 0), , size = 2.5, inherit.aes = FALSE)+
+    theme(axis.text.x = element_text(size = 7,color = "darkgray"))+
+  theme(legend.text = element_text(size = 7))
+
+
+# # Choroplèthe. Catégories de commanditaires (=détail)
+# ggplot(data = BDD2, aes(x = 1, y = TotalCount, fill = categorie)) +
+#   geom_bar(stat = "identity") +
+#   coord_polar(theta = "y") +  # Créez un graphique circulaire empilé
+#   scale_fill_viridis_d() +
+#   theme_minimal()+
+#     scale_fill_manual(values = colorsdegrad)+
+#   facet_wrap(~ANNEE_Parution, ncol = 5) +  # Facettes par année (vous pouvez ajuster le nombre de colonnes)
+#   labs(title = "Répartition des marchés d'évaluation de politique publique par commanditaire et par année (2006-2023)",
+#        caption = "source : auteur, à partir des données BOAMP")
+
+
+
+# ggplot(data = BDD2, aes(x = 1, y = TotalCount, fill = categorie)) +
+#   geom_bar(stat = "identity") +
+#   coord_polar(theta = "y") +  # Créez un graphique circulaire empilé
+#   scale_fill_manual(values = colorsdegrad) +
+#   theme_minimal() +
+#   facet_wrap(~ANNEE_Parution, ncol = 5) +  # Facettes par année avec échelles libres si nécessaire
+#   labs(title = "Répartition des marchés d'évaluation de politique publique par commanditaire et par année (2006-2023)",
+#        caption = "source : auteur, à partir des données BOAMP") +
+#   theme(axis.text.x = element_blank())  # Supprime les étiquettes de l'axe des x
+
+# # Créer le graphique
+# ggplot(data = BDD2, aes(x = 1, y = TotalCount, fill = categorie)) +
+#   geom_bar(stat = "identity") +
+#   coord_polar(theta = "y") +
+#   scale_fill_manual(values = colorsdegrad) +
+#   theme_minimal() +
+#   facet_wrap(~ANNEE_Parution, ncol = 5) +
+#   labs(title = "Répartition des AO d'évaluation par commanditaires et par an (2006-2023)",
+#       subtitle = "Au centre, la valeur totale de l'année",
+#        caption = "source : auteur, à partir des données BOAMP",
+#        x = NULL,
+#        y = NULL) +
+#     theme(axis.text.y = element_blank(), axis.ticks.y = element_blank()) +
+# scale_y_continuous(breaks = seq(0, 1000, by = 200),
+#                      labels = seq(0, 1000, by = 200)) +
+#       labs(fill = "Commanditaires") + 
+#     geom_text(data = totals_by_year, aes(label = paste(TotalCount), x = 0, y = 0), 
+#             position = position_stack(vjust = 0), , size = 2.5, inherit.aes = FALSE)+
+#     theme(axis.text.x = element_text(size = 7,color = "darkgray"))
+```
+
+
+```{r setup}
+# Agrégez les données de catégories d'acteurs par région (type acteurs AO par région)
+categories_aggregated <- boampdataBDD %>%
+  group_by(Région, categorie, ANNEE_Parution) %>%
+  summarize(Count = n()) %>%
+  ungroup()
+
+# Fusionnez les données de catégories agrégées avec les données de régions
+regions_sfx <- left_join(regions_sf, categories_aggregated, by = c("reg_name_up" = "Région"))
+
+# Créez la carte choroplèthe
+ggplot(data = regions_sfx, aes(x = 1, y = Count, fill = categorie)) +
+  geom_bar(stat = "identity") +
+  coord_polar(theta = "y") +  # Créez un graphique circulaire empilé
+  scale_fill_viridis_d() +
+  facet_wrap(~reg_name_up, ncol = 4) +  # Facettes par région
+  theme_minimal() +
+  labs(title = "Répartition des marchés d'évaluation de politique publique par commanditaire et par régions (2006-2023)",
+              caption = "source : auteur, à partir de l'extraction API BOAMP")
+
+```
+
+
+```{r setup}
+# Régions / commanditaire / an 
+ggplot(data = regions_sfx, aes(x = ANNEE_Parution, y = Count, color = categorie, group = categorie)) +
+  geom_line(size = 1) +  # Utilisez geom_line pour créer des courbes par catégorie
+  scale_color_viridis_d() +
+  facet_wrap(~reg_name_up, scales = "free_y", ncol = 3) +  # Facettes par région avec échelle y libre
+  theme_minimal() +
+  labs(title = "Répartition des marchés d'évaluation de politique publique par commanditaire et par année (2006-2023)",
+       caption = "source : auteur, à partir de l'extraction API BOAMP")
+```
+
+```{r setup}
+# Commanditaires / an
+categories_aggregated_commanditaire <- boampdataBDD %>%
+  group_by(categorie, ANNEE_Parution) %>%
+  summarize(Count = n(), .groups = "drop")
+
+#Histograme 
+ggplot(categories_aggregated_commanditaire, aes(x=ANNEE_Parution, y=Count, fill=categorie)) +
+  geom_bar(stat="identity", position="stack") +
+  labs(title="Nombre d'appels d'offre par catégorie et année de parution",
+       x="Année de Parution", y="Nombre d'appels d'offre",
+       caption = "source : auteur, à partir de l'extraction API BOAMP") +
+  theme_minimal()
+
+
+#Uniquement lignes pour les principaux 
+categories_aggregated_commanditairetop <- boampdataBDD %>%
+ group_by(categorie, ANNEE_Parution) %>%
+  summarize(Count = n(), .groups = "drop") %>%
+  filter(categorie %in% c("Region", "Etat central", "Ville / communaute de communes / Metropole"))
+
+ggplot(categories_aggregated_commanditairetop, aes(x=ANNEE_Parution, y=Count, color=categorie, group=categorie)) +
+  geom_line(size=1) + 
+  geom_point(size=3) + # Ajout de points pour mieux visualiser les données pour chaque année
+  labs(title="Nombre d'enregistrements par catégorie et année de parution",
+       x="Année de Parution", y="Nombre d'enregistrements") +
+  theme_minimal()
+
+```
+
+# CONTENU DES MARCHES
+Cette section traite le contenu de l'intitulé des marchés et leurs montants. Le problème est que les montants finaux de chaque marché ne sont pas publiés dans la base de données, on doit donc se contenter des seuils pour en avoir une estimation. 
+
+Pour connaitre la signification des familles : 
+https://simulateurs.boamp.fr/simulateur/calcul/formulaires
+
+## Seuils des marchés publiés 
+```{r setup}
+table(boampdataBDD$famille_libelle)
+
+Marchés <- boampdataBDD %>%
+  filter(famille_libelle != "Délégation de service public" & 
+         famille_libelle != "Divers")
+
+
+total_global <- nrow(Marchés)
+
+# Calcul des totaux par famille et des pourcentages
+total_per_famille <- Marchés %>%
+  group_by(famille_libelle) %>%
+  summarize(Total_per_famille = n(),
+            Percentage = (Total_per_famille / total_global) * 100)
+
+# Calculer la part de chaque Groupe_commanditaires par famille_libelle, relativement à cette famille
+group_commanditaires_counts <- Marchés %>%
+  group_by(famille_libelle, Groupe_commanditaires) %>%
+  summarize(Count = n(), .groups = 'drop') %>%
+  left_join(total_per_famille, by = "famille_libelle") %>%
+  mutate(Percentage = sprintf("%.1f%%", (Count / Total_per_famille) * 100))
+
+# Transformer les données pour que chaque Groupe_commanditaires ait deux colonnes
+group_commanditaires_wide <- group_commanditaires_counts %>%
+  pivot_wider(
+    names_from = Groupe_commanditaires, 
+    values_from = c(Count, Percentage),
+    names_sep = "_",
+    values_fill = list(Count = 0, Percentage = "0.0%")  # Remplir les valeurs manquantes par 0 et "0.0%"
+  )
+# Fusionner les données avec familles_df
+final_df <- left_join(total_per_famille, group_commanditaires_wide, by = "famille_libelle")
+
+# Afficher le dataframe mis à jour
+final_df
+
+write_xlsx(final_df, "final_df2.xlsx")
+
+# Utiliser stargazer pour créer un tableau de votre dataframe
+stargazer(final_df, type = "html", title = "Tableau des Familles et Groupes Commanditaires", 
+          summary = FALSE, out = "tableau_final.txt")
+
+# à mettre dans le HTML de sortie du stargazer 
+# <head>
+# <style>
+#   body {
+#     font-family: Arial, sans-serif;
+#   }
+#   table {
+#     border-collapse: collapse;
+#     width: 100%;
+#     max-width: 1000px; /* Ajustez selon la largeur souhaitée */
+#     margin: auto; /* Centre le tableau sur la page */
+#   }
+#   th, td {
+#     border: 1px solid #dddddd;
+#     text-align: left;
+#     padding: 8px;
+#   }
+#   th {
+#     background-color: #f2f2f2;
+#   }
+#   tr:nth-child(even) {
+#     background-color: #f9f9f9;
+#   }
+# </style>
+# </head><table style="text-align:center"><caption><strong>Montants des marchés par groupe de commanditaires </strong></caption>
+# <tr><td colspan="13" style="border-bottom: 1px solid black"></td></tr><tr><td style="text-align:left"></td><td>Seuils marchés</td><td>Total</td><td>Part</td><t/td><td>Nb_Collectivités</td><td>Nb_Divers</td><td>Nb_Etab.publics</td><td>Nb_Etat</td><td>%_Collectivités</td><td>%_Divers</td><td>%_Etab. publics</td><td>%_Etat</td></tr>
+# <tr><td colspan="13" style="border-bottom: 1px solid black"></td></tr><tr><td style="text-align:left">1</td><td>Marchés < 90 k€ (MAPA)</td><td>1,509</td><td>37.0%</td></td><td>839</td><td>234</td><td>236</td><td>200</td><td>55.6%</td><td>15.5%</td><td>15.6%</td><td>13.3%</td></tr>
+# <tr><td style="text-align:left">2</td><td>Marchés entre 90 k€ et seuils européens</td><td>1,289</td><td>31.6%</td><td>676</td><td>168</td><td>156</td><td>289</td><td>52.4%</td><td>13.0%</td><td>12.1%</td><td>22.4%</td></tr>
+# <tr><td style="text-align:left">3</td><td>Marchés européens</td><td>1,279</td><td>31.4%</td><td>539</td><td>125</td><td>158</td><td>457</td><td>42.1%</td><td>9.8%</td><td>12.4%</td><td>35.7%</td></tr>
+# <tr><td colspan="13" style="border-bottom: 1px solid black"></td></tr></table>
+```
+
+## Seuils des marchés par an 
+```{r setup}
+# donnees_annee <- Marchés %>%
+#     filter(famille_libelle != "Délégation de service public" & 
+#          famille_libelle != "Divers")
+donnees_annee <- Marchés %>%
+  group_by(ANNEE_Parution, famille_libelle) %>%
+  summarize(Nombre = n(), .groups = 'drop') %>%
+  group_by(ANNEE_Parution) %>%
+  mutate(Percentage = (Nombre / sum(Nombre))*100)
+
+# Création du graphique ggplot avec des histogrammes empilés et des étiquettes
+ggplot(donnees_annee, aes(x = ANNEE_Parution, y = Percentage, fill = famille_libelle)) +
+  geom_bar(stat = "identity", position = "fill") +
+  geom_text(aes(label = sprintf("%.0f%%", Percentage)), 
+            position = position_fill(vjust = 0.5), 
+            size = 3,
+            fontface = "bold",
+            check_overlap = TRUE) +
+  scale_fill_manual(values = colorsfamilles) +
+  theme_minimal() +
+  labs(title = "Répartition des seuils de marchés par années (2007-2023)",
+       subtitle = "N=4316",
+       x = "Année de parution",
+       y = "Pourcentage (%)",
+       fill = "Seuils de marchés",
+       caption = "Source : auteur, à partir des données BOAMP")
+
+
+# Préparer les données pour le graphique en courbes
+donnees_annee <- Marchés %>%
+  group_by(ANNEE_Parution, famille_libelle) %>%
+  summarize(Nombre = n(), .groups = 'drop')
+
+# Créer le graphique en courbes
+ggplot(donnees_annee, aes(x = ANNEE_Parution, y = Nombre, color = famille_libelle, group = famille_libelle)) +
+  geom_line() +
+geom_point(color = "black", size = 1) +
+geom_text(aes(label = Nombre), vjust = -1, hjust = 1, check_overlap = TRUE, size = 3, color = "black") +  theme_minimal() +
+  scale_color_manual(values = colorsfamilles) +
+  geom_vline(xintercept = c("2013","2016"), linetype = "dashed", colour = "red") +
+  ggplot2::annotate("text", x = "2010", y = 5, label = "expansion",colour = "red", size=3) +
+  ggplot2::annotate("text", x = "2014", y = 5, label = "contraction",colour = "red", size=3) +
+  ggplot2::annotate("text", x = "2019", y = 5, label = "stabilisation",colour = "red", size=3)+
+  labs(title = "Evolution du nombre d'AO par seuils de marchés (2007-2023)",
+       subtitle = "N=4316",
+       x = "Année de parution",
+       y = "Nombre d'AO",
+       color = "Seuils de marchés",
+       caption = "Source : auteur, à partir des données BOAMP")
+
+```
+
+## Accords cadres
+
+```{r setup}
+# Calculer la part des accords-cadres par année
+
+table(boampdataBDD$accord_cadre)
+
+
+part_accord_cadre <- boampdataBDD %>%
+  group_by(ANNEE_Parution) %>%
+  summarize(Total_Marches = n(),
+            Accord_Cadre= sum(accord_cadre),
+            Pourcentage_Accord_Cadre = (Accord_Cadre / Total_Marches) * 100) %>%
+  ungroup()
+
+part_accord_cadre_par_groupe <- boampdataBDD %>%
+  group_by(Groupe_commanditaires,ANNEE_Parution) %>%
+  summarize(Total_Marches_Groupe = n(),
+            Accord_Cadre_Groupe = sum(accord_cadre),
+            Pourcentage_Accord_Cadre_Groupe = (Accord_Cadre_Groupe / Total_Marches_Groupe) * 100) %>%
+  ungroup()
+
+# Créer un graphique de ligne avec des courbes pour chaque groupe de commanditaires et la courbe du total
+ggplot() +
+  geom_bar(data = part_accord_cadre_par_groupe,
+           aes(x = ANNEE_Parution, y = Accord_Cadre_Groupe, fill = "Nombre"),
+           stat = "identity", position = "dodge") +
+    geom_line(data = part_accord_cadre, aes(x = ANNEE_Parution, y = Pourcentage_Accord_Cadre, group = 1, color = "Pourcentage")) + # Ajout de color dans aes
+  geom_point(data = part_accord_cadre, aes(x = ANNEE_Parution, y = Pourcentage_Accord_Cadre)) +
+  geom_text(data = part_accord_cadre, aes(x = ANNEE_Parution, y = Pourcentage_Accord_Cadre, label = sprintf("%.1f%%", Pourcentage_Accord_Cadre)),
+            vjust = -0.5, color = "black") +
+  scale_fill_manual(values = c("Nombre" = "#FFAE9D")) +
+  scale_y_continuous(breaks = seq(0, max(part_accord_cadre_par_groupe$Accord_Cadre_Groupe, na.rm = TRUE), by = 1)) + # Graduation de l'axe Y
+  scale_color_manual(values = c("Pourcentage" = "blue"), name = "Type", labels = c("Pourcentage")) + # Ajout de scale_color_manual
+  theme_minimal() +
+    theme(legend.title = element_blank()) + # Suppression des titres de légende
+  labs(title = "Nombre et part des marchés d'évaluation accords-cadres (2006-2023)",
+       subtitle = "N=55",
+       x = "Année de parution",
+       y = "Part (%) / Nombre d'accords-cadres",
+       caption = "Source : auteur, à partir des données BOAMP",
+       fill = "Légende")
+
+#Pour faire des filtres à la main 
+filtre <- boampdataBDD %>%
+   filter(accord_cadre == 1) %>%
+   filter(!is.na(famille_libelle)) %>%
+  group_by(Groupe_commanditaires, categorie, Commanditaire,objet) %>%
+  summarize(percentage = n() / nrow(.) * 100)
+
+filtre <- boampdataBDD %>%
+  filter(grepl("ademe", nomacheteur, ignore.case = TRUE))
+
+
+
+
+acccadrecommanditaireX$percentage <- sprintf("%.1f %%", acccadrecommanditaireX$percentage)
+
+# Commanditaires des accords-cadres
+acccadrecommanditaire <- boampdataBDD %>%
+  filter(accord_cadre == 1) %>%
+  group_by(categorie) %>% #ou Groupe pour varier 
+  summarize(total = n(),
+            percentage = n() / nrow(.) * 100) %>% #remplacer percentage par Count pour la valeur absolue )
+    arrange(desc(percentage))
+
+ggplot(acccadrecommanditaire, aes(x = reorder(categorie, -total), y = total)) +
+  geom_bar(stat = "identity", fill = "blue") +
+  coord_flip() +  # Inverse les axes pour une meilleure lisibilité
+  labs(title = "Répartition des accords-cadres par commanditaires",
+       x = "Catégorie",
+       y = "Total") +
+  theme_minimal()
+
+
+kable(acccadrecommanditaire, caption = "Répartition des accors-cadres par commanditaires")
+
+```
+
+## Evaluation d'impact 
+```{r setup}
+IMPACT <- boampdataBDD %>%
+   filter(ANNEE_Parution != "2006") %>%
+  group_by(ANNEE_Parution,Groupe_commanditaires) %>% #enelever groupe_commanditaire ou categorie et le facet wrap pour avoir le graph dans le doc 
+  summarize(Total_Eval = n(),
+            Impact = sum(eval_impact),
+            Pourc_impact = (Impact / Total_Eval)*100) %>%
+  ungroup() %>%
+   filter(Impact != 0) #retirer ça aussi pour retrouver le graphique d'avant
+
+table(boampdataBDD$eval_impact)
+sum(IMPACT$Impact)
+
+# Créer un graphique de ligne avec des courbes pour chaque groupe de commanditaires et la courbe du total
+ggplot()+
+  geom_bar(data = IMPACT,
+           aes(x = ANNEE_Parution, y = Impact, fill = "Nombre d'évaluations d'impact"),
+           stat = "identity", position = "dodge") +
+  geom_line(data = IMPACT, aes(x = ANNEE_Parution, y = Pourc_impact, group = 1, color = "Pourcentage"), linetype = "solid") +
+  geom_point(data = IMPACT, aes(x = ANNEE_Parution, y = Pourc_impact, color = "Pourcentage")) +
+  geom_text(data = IMPACT, aes(x = ANNEE_Parution, y = Pourc_impact, label = sprintf("%.1f%%", Pourc_impact)),
+            vjust = -0.5, color = "black", nudge_y = 0.5,size = 2.5) + # Ajuster la position de l'étiquette vers le haut (ou vers le bas si nécessaire)
+  scale_fill_manual(name = "", values = c("Nombre d'évaluations d'impact" = "grey")) + # Titre de la légende "fill" vide
+  scale_color_manual(name = NULL, values = c("black" = "black", "Pourcentage" = "red")) + # Supprimer le titre de la légende "color"
+  theme_minimal() +
+    scale_y_continuous(limits = c(0, 35)) + # Définir les limites de l'axe Y
+    scale_x_discrete(breaks = unique(IMPACT$ANNEE_Parution)[seq(1, length(unique(IMPACT$ANNEE_Parution)), by = 2)]) + # Afficher une année sur deux (by = 2)
+  facet_wrap(~Groupe_commanditaires, ncol = 2) + #RETIRER SI NECESSAIRE MAIS AUSSI EN HAUT LE GROUP BY COMMANDITAIRES
+  labs(title = "Nombre et part des évaluations d'impact (2006-2023)",
+       subtitle = "N=297",#212 (retrait de N=12 pour l'année 2006)",
+       x = "Année de parution",
+       y = "Part (%) / Nombre de marchés",
+       caption = "Source : auteur, à partir des données BOAMP")
+
+table(boampdataBDD$eval_impact)
+       
+# Même chose mais avec une courbe par catégorie de commanditaire 
+
+impactxx <- boampdataBDD %>%
+  # filter(ANNEE_Parution != "2006") %>%
+  group_by(Groupe_commanditaires,categorie, ANNEE_Parution) %>%
+  summarize(Total_Eval_Impact = n(),
+            Impact = sum(eval_impact),
+            Pourc_impact = (Impact / Total_Eval_Impact)*100) %>%
+  ungroup()
+
+moyennes_par_groupe <- boampdataBDD %>%
+  # filter(ANNEE_Parution != "2006") %>%
+  group_by(Groupe_commanditaires) %>%
+  summarize(Impact = sum(eval_impact),
+            moyenne_Impact = Impact/18) %>%
+  ungroup()
+  
+ggplot(impactxx, aes(x = as.numeric(ANNEE_Parution), y = Impact, fill = categorie)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_hline(data = moyennes_par_groupe, aes(yintercept = moyenne_Impact), color = "red", linetype = "dashed") +
+    geom_hline(data = moyennes_par_groupe, aes(yintercept = moyenne_Impact, linetype = "Moyenne par année"), color = "red") +  guides(linetype = guide_legend(override.aes = list(color = "red")))+
+  facet_wrap(~ Groupe_commanditaires) +
+  labs(title = "Nombre d'appels d'offre consistant à réaliser des évaluations d'impact (2006-2023)",
+       subtitle = "N=297",
+       caption ="Source : auteur, à partir des données BOAMP",
+       x = "Année de parution", 
+       y = "Nombre d'appels d'offre") +
+  theme_minimal() +
+    scale_linetype_manual(values = "dashed", guide = FALSE)+ 
+  scale_y_continuous(breaks = seq(0, 20, by = 2))+
+  scale_x_continuous(breaks = seq(2006, 2023, by = 2))
+
+rm(impactxx, IMPACT)
+
+# Comparaison total et impact 
+filtre <- boampdataBDD %>%
+    filter(eval_impact == 1) #%>% 
+  #filter(Groupe_commanditaires == "Collectivités")
+
+filtretableau <- filtre %>%
+  group_by(categorie) %>%
+  summarize(Total = n()) %>%
+  mutate(Percentage = (Total / sum(Total)) * 100)
+
+filtretableauBDD <- boampdataBDD %>%
+  group_by(categorie) %>%
+  summarize(Total = n()) %>%
+  mutate(Percentage = (Total / sum(Total)) * 100)
+
+filtretableau <- filtretableau %>% mutate(Source = "Evaluations impact (N=297)")
+filtretableauBDD <- filtretableauBDD %>% mutate(Source = "Total AO (N=7438)")
+
+# Combinez les deux ensembles de données
+combined_data <- rbind(filtretableau, filtretableauBDD) %>%
+    arrange(desc(Percentage))
+
+# Créez un graphique à facettes
+ggplot(combined_data, aes(x = reorder(categorie, -Percentage), y = Percentage, fill = Source)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  geom_text(aes(label = sprintf("%.1f%%", Percentage)), 
+            position = position_dodge(width = 0.9), vjust = -0.25) +
+  facet_wrap(~ Source, ncol = 1) +
+  scale_y_continuous(limits = c(0, 30)) +
+  theme_minimal() +
+  labs(x = "Catégorie", y = "Pourcentage", title = "Commanditaires des évaluations (2006-2023)", caption = "Source : auteur, à partir des données BOAMP") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1,size = rel(0.8)), legend.position = "none")+  scale_x_discrete(labels = function(x) str_wrap(x, width = 15)) # Largeur ajustable pour le retour à la ligne
+```
+
+
+# THEMATIQUES
+
+## Graphique total par thématiques 
+```{r setup}
+categorie_counts <- table(boampdataBDD$categorie_finale)
+categorie_counts <- sort(categorie_counts, decreasing = TRUE)# Trier par ordre décroissant
+
+# Créer l'histogramme avec ggplot2
+ggplot(data = data.frame(Categorie = names(categorie_counts), Count = as.vector(categorie_counts)), 
+       aes(x = reorder(Categorie, Count), y = Count)) +
+  geom_bar(stat = "identity",fill = "grey") +
+  geom_text(aes(label = Count), vjust = -0.5)+ # Ajouter des étiquettes de données +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),legend.position = "none")+ 
+  labs(title = "Thématiques des appels d'offre (2006-2023)",
+       subtitle = "N=7438",
+       x = "Thématiques", y = "Nombre d'occurrences",
+       caption = "Source : auteur, à partir des données BOAMP") + 
+  theme_minimal()+theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  scale_y_continuous(limits = c(0, 2500))
+
+    
+
+# Préparation des données
+boampdataBDD$EIE <- as.factor(boampdataBDD$EIE) # Assurez-vous que EIE est un facteur
+boampdataBDD$Count <- 1 # Colonne pour faciliter le comptage
+
+# Créer un dataframe avec le comptage total et le comptage pour EIE = 1
+data_counts <- boampdataBDD %>%
+  group_by(categorie_finale, EIE) %>%
+  summarise(Count = n()) %>%
+  spread(EIE, Count, fill = 0) %>%
+  mutate(Total = `1` + `0`, TopEIE1 = Total - `1`)
+
+# Graphique
+ggplot(data = data_counts, aes(x = reorder(categorie_finale, Total))) +
+  geom_bar(aes(y = Total, fill = "Total"), stat = "identity") +
+  geom_bar(aes(y = TopEIE1), stat = "identity", fill = "grey") +
+  geom_text(aes(y = Total, label = Total), vjust = -0.5) +
+  geom_text(aes(y = TopEIE1, label = ifelse(`1` > 0, `1`, "")), vjust = 1.5, color = "darkgreen",size=3) +
+  scale_fill_manual(name = "Légende", 
+                    values = c("Total" = "darkgreen"),
+                    labels = c("Total" = "EIE réglementaires")) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1),
+        legend.position = "right") +
+  labs(title = "Thématiques des appels d'offre (2006-2023)",
+       subtitle = "N=7438",
+       x = "Thématiques", y = "Nombre d'occurrences",
+       caption = "Source : auteur, à partir des données BOAMP") +
+  scale_y_continuous(limits = c(0, 3500))
+
+table(boampdataBDD$EIE)
+    
+```
+
+## Thématiques X commanditaires
+
+```{r setup}
+# Préparation des données
+commanditairesthematiques <- boampdataBDD %>%
+  filter(Groupe_commanditaires != "Divers") %>%
+  group_by(Groupe_commanditaires, categorie_finale) %>%
+  summarize(Nombre = n(), .groups = 'drop') %>%
+  group_by(Groupe_commanditaires) %>%
+  mutate(Percentage = (Nombre / sum(Nombre))*100)
+
+# Création du graphique ggplot avec des histogrammes empilés et des étiquettes
+ggplot(commanditairesthematiques, aes(x = Groupe_commanditaires, y = Percentage, fill = categorie_finale)) +
+  geom_bar(stat = "identity", position = "fill") +
+  geom_text(aes(label = sprintf("%.0f%%", Percentage)), 
+            position = position_fill(vjust = 0.5), 
+            size = 3, 
+            fontface = "bold",
+            color = "white",
+            check_overlap = TRUE) +
+  scale_fill_viridis_d() +
+  theme_light() +
+  labs(title = "Thématiques des appels d'offre (2006-2023)",
+       subtitle = "N=7438",
+       y = "Pourcentage (%)",
+       x = " ",
+       fill = "Thématiques",
+       caption = "Source : auteur, à partir des données BOAMP")
+
+# Titulaires des EIE 
+titulairesEIE <- boampdataBDD %>%
+  filter (EIE == 1)
+
+```
+
+## Thematiques X années
+
+```{r setup}
+themean <- boampdataBDD %>%
+  group_by(categorie_finale, ANNEE_Parution) %>%
+  summarize(
+    Count = n(),
+    Count_nonEIE = sum(ifelse(EIE == 1, 0, 1))
+  ) %>%
+  ungroup()
+
+# Création du graphique en LOG (supprimer log10 au besoin)
+ggplot() +
+    geom_text_repel(
+    data = themean,
+    aes(x = ANNEE_Parution, y = Count_nonEIE, label = Count_nonEIE, group = categorie_finale, colour = categorie_finale), nudge_y = 0.01,  # Ajuster selon les besoins
+    point.padding = 0,
+    box.padding = 0,
+    size = 2.5) +
+  geom_line(data = themean, aes(x = ANNEE_Parution, y = Count, group = categorie_finale, colour = categorie_finale), linetype = "dashed") +
+  geom_line(data = themean, aes(x = ANNEE_Parution, y = Count_nonEIE, group = categorie_finale, colour = categorie_finale), linetype = "solid") +
+  geom_point(data = themean, aes(x = ANNEE_Parution, y = Count_nonEIE, group = categorie_finale, colour = categorie_finale)) +
+    # scale_colour_viridis_d()+
+  labs(title="Thématiques des AO par année",
+       subtitle= "Environnement + EIE (ligne pointillée) / hors EIE (ligne pleine)",
+       x="Année de parution", y="Nombre d'appels d'offre",
+       colour = "Thématiques",
+       caption = "source : auteur, à partir de l'extraction API BOAMP")+scale_y_log10()
+
+# En facet_wrap 
+ggplot(data = themean, aes(x = ANNEE_Parution)) +
+    geom_text_repel(
+    data = themean,
+    aes(x = ANNEE_Parution, y = Count_nonEIE, label = Count_nonEIE, group = categorie_finale, colour = categorie_finale),max.overlaps = 100,  # Ajuster selon les besoins
+    size = 2) +
+  geom_line(aes(y = Count, group = categorie_finale, colour = categorie_finale), linetype = "dashed") +
+  geom_line(aes(y = Count_nonEIE, group = categorie_finale, colour = categorie_finale), linetype = "solid") +
+  geom_point(aes(y = Count_nonEIE, group = categorie_finale, colour = categorie_finale)) +
+  scale_colour_viridis_d() +
+  facet_wrap(~ categorie_finale, scales = 'free_y', ncol = 3) +
+    scale_x_discrete(breaks = seq(min(themean$ANNEE_Parution), max(themean$ANNEE_Parution), by = 2)) +
+      geom_vline(xintercept = c("2013","2016"), linetype = "dashed", colour = "red", size=0.2) +
+  labs(title = "Thématiques des AO par année",
+       subtitle = "N=7438 (lignes pointillées = avec EIE)",
+       x = "Année de parution", 
+       y = "Nombre d'appels d'offre",
+       caption = "Source : auteur, à partir de l'extraction API BOAMP") +
+  theme_minimal()+  theme(legend.position = "none")  # Supprimer la légende
+```
+
+## 
+
+```{r setup}
+
+```
+
+
+
+# ATTRIBUAIRES
+
+## Qui sont les attributaires
+On travail ici avec la base complète des doulons de marchés : pas de problème, car on prend que les lignes où il y a des attributaires ! 
+Il y a une ligne qui a été mal récupérée car beaucoup trop longue : il s'agit du marché 
+
+```{r setup}
+
+# Qui sont les cabinets titualires ? 
+cabinetstitulaires <- TITULAIRES %>%
+  filter(!is.na(titulaire) & titulaire != "") %>%
+  select(dateparution, ANNEE_Parution, Commanditaire, categorie,Groupe_commanditaires,Région, eval_impact, eval_reglementUE,objet,titulaire,famille_libelle)
+
+# # Pour une base par date avant 2015
+# cabinetstitulairesAV2015 <- boampdataBDD %>%
+#   filter(!is.na(titulaire) & titulaire != "" & dateparution < as.Date("2015-01-01"))
+
+# Nettoyage des données
+cabinetstitulaires$clean_titulaires <- cabinetstitulaires$titulaire %>%
+  tolower() # Tout en minuscules
+  gsub("[[:punct:]]", "", .) # Retirer la ponctuation
+  gsub("\\s+", " ", .) %>% # Retirer les espaces superflus
+  trimws() # Retirer les espaces au début et à la fin
+
+# Analyse des groupements 
+cabinetstitulaires <- cabinetstitulaires %>%
+  mutate(groupement = ifelse(grepl("groupement|consortium|groupé|quadrant conseilamnyos|multi attributaires|eqr mazars|riocabinet mercier|bvapluricitéitinere|pharecredocquadrant", clean_titulaires, ignore.case =  TRUE), 1,0))
+
+resume_data <- cabinetstitulaires %>%
+  group_by(ANNEE_Parution) %>%
+  summarise(Nombre_de_grp = sum(groupement == 1)) %>%
+  arrange(ANNEE_Parution)
+
+ggplot(data = resume_data, aes(x= ANNEE_Parution, y= Nombre_de_grp)) +
+  geom_bar(stat="identity", position="stack", fill = "grey") + 
+  geom_text(aes(label=Nombre_de_grp), vjust=-0.5, size=3.5) +
+  # geom_vline(xintercept = c("2013","2016"), linetype = "dashed", colour = "red") +
+  # annotate("text", x = "2010", y = 9, label = "expansion",colour = "red", size=3) +
+  # annotate("text", x = "2014", y = 9, label = "contraction",colour = "red", size=3) +
+  # annotate("text", x = "2019", y = 9, label = "stabilisation",colour = "red", size=3)+
+  labs(x = "Année", y = "Nombre de groupements", title = "Évolution du nombre de groupements par année (2006-2023)", caption = "source : auteur, à partir de l'extraction API BOAMP") +
+  theme_minimal()+
+  scale_y_continuous(limits = c(0, 10),breaks = seq(0, 10, by = 1))
+ 
+
+# BigCab
+travail <- cabinetstitulaires %>%
+  select(clean_titulaires, groupement,ANNEE_Parution)
+travail <- travail %>%
+  mutate(Bigcab = ifelse(str_detect(clean_titulaires, "young|kpmg|systra|setec|deloitte|mazar|capgemini|gemini|ipsos|bva|pwc|ineum|eurogroup|groupe eneis"), "Oui", "Non"), #ne pas mettre eneis tout court car sinon = période avant KPMG
+         Groupement_1 = ifelse(groupement == 1, "Oui", "Non"))
+
+ggplot(travail, aes(x = ANNEE_Parution, fill = Groupement_1)) +
+  geom_bar(data = filter(travail, Bigcab == "Oui"), position = "stack") +
+  scale_fill_manual(values = c("Oui" = "orange", "Non" = "grey"),
+                    name = "Répondu en groupement",
+                    labels = c("Oui" = "Oui", "Non" = "Non")) +
+  labs(title = "Marchés d'évaluation attribués à de grands cabinets de conseil (2006-2023)",
+       subtitle = "N=59",
+       x = "Année", y = "Nombre de marchés",
+       caption = "source : auteur, à partir de l'extraction API BOAMP") +
+  theme_minimal()
+
+
+table(travail$Bigcab)
+
+
+# Classement des attributaires 
+cabinetstitulaires <- cabinetstitulaires %>%
+  mutate(typologie_attributaires = case_when(
+    str_detect(clean_titulaires, "cabinet|consul|societe|conseil|société|planete|planète|pluric|algo|edater|indd|ingén|teriteo|mazar|young|managemen|agence|sas|amnyos|2000|sas|eneis|setec|cemka|partners|technopolis|epices|kpmg|slk|sarl|eureval|eurogroup|t33 srl|argoesiloe|acadie|accoast|somival|agence|ispos|sofres|adecco|jones lang lasalle|sage|citemetrie|idrh|thg|junium|mm2i|aquascop|international|ipso|geste|etm|mouvens|gama environnement|optimressources|direct medica|scat|interface|asdo|cdhu|semaphores|pwc|icms|groupement veodis 3d|groupement|terra vivu|terroiko|bnp|i care|scet|eurofins|ingenierie|ireedd|occurrence|mediaterre|isatis|morgan philips|stratelys|bureau|ism corum|service global|egis|axessio|formaeva|biotope|armoris|urapeda|abak|vizea|mosaique|anatome|ad fine|start up|cyathea|cbre|gm fac|adage|alcimed|altus mundi|aon|arcadis esg
+|ascode|bva|cap gemini|compagnie européenne dintelligence stratégique|compagnie européenne|contrechamp|ecosphere|effia synergies|france|ergomatic|eureca|felix creation
+|icme|eurocontact|mm2c|scp communication|sgs multilab|ifop|indiggo|i care environnement
+|occurrence|viavoice|in vivo|terredavance|oncodesign|arcadis|sanesco|urbanis|institute for energy and environmental research|tmo régions|brl|interface|advenir|citizing|tis pt|granit communication|inter action développement durable jeanmarie collombon|creham|startelys|aere|veltys|grant thornton|armines|auditoire|infra finances|2bdm|felix creation|ville et habitat|armonis|objectif patrimoine|public health expertise|i care environnement|ecostratégieecostratégie|gens dévénement|ide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnementide environnement") ~ "Cabinet de conseil / Bureau d'étude",
+    str_detect(clean_titulaires, "univ|cneh|brgm normandie|crida|iram|centexbel") ~ "Université / ESR",
+    str_detect(clean_titulaires, "fors|credoc|association|50|ceidre|afpa|cdhat|energies cites|le pouvoir des idees|fondation européenne de la science|parcourir leurope|siaci saint honore|gie caths conception de laccueil du transit et dhabitats spécifiques|institute for energy and environmental research") ~ "Association",
+    str_detect(clean_titulaires, "sans suite|infructu|néant|neant") ~ "Sans suite",
+    str_detect(clean_titulaires, "social|autre|plastic omnium systèmes urbains|soliha
+|soliha jura saône et loire|initiative pyreneeschambre dagriculture des hautespyrénées|cibc moselle cci moselle|commissariat|canal de provence|fondation des villes mandataire|pact du valdemarne|mondial formation|largus de la presse|philippe millasseaumandataire|alternative éducation formation|initiative pyreneeschambre departementale dagriculture") ~ "Autre",
+    TRUE ~ "Non codé"
+  ))
+
+areprendre <- cabinetstitulaires %>%
+  filter(typologie_attributaires == "Non codé") %>%
+  select(objet,Commanditaire,titulaire,clean_titulaires)
+
+table(cabinetstitulaires$typologie_attributaires)
+
+
+# Calcul des pourcentages
+typologie_data <- table(cabinetstitulaires$typologie_attributaires)
+typologie_df <- as.data.frame(typologie_data)
+typologie_df$percentage <- (typologie_df$Freq / sum(typologie_df$Freq)) * 100
+
+# Trier par ordre décroissant des pourcentages et ajuster les facteurs
+typologie_df <- typologie_df[order(-typologie_df$percentage),]
+typologie_df$Var1 <- factor(typologie_df$Var1, levels = typologie_df$Var1)
+
+# Création du graphique en camembert
+ggplot(typologie_df, aes(x="", y=percentage, fill=Var1)) +
+  geom_bar(stat="identity", width=1) +
+  coord_polar("y", start=0) +
+  theme_void() +
+  theme(legend.title = element_blank()) +
+  geom_text(aes(label = paste0(round(percentage, 1), "%")), position = position_stack(vjust = 0.5))
+```
+
+## Affichage des principaux titulaires (clustering)
+Comme les tilulaires sont inscrits de façon hétérogène, avec parfois des phrases, parfois des fautes etc. on emploi une méthode de clusterisation pour identifier les principaux 
+```{r setup}
+
+# Clustering en utilisant la distance de Jaro-Winkler
+mat <- stringdist::stringdistmatrix(cabinetstitulaires$clean_titulaires, 
+                                    cabinetstitulaires$clean_titulaires, 
+                                    method = "jw")
+clustering <- hclust(as.dist(mat), method = "ward.D2")
+clusters <- cutree(clustering, h = 0.1) # Essayez d'ajuster cette valeur
+# Ajouter les clusters au dataframe
+cabinetstitulaires$cluster <- clusters
+
+cluster_names <- cabinetstitulaires %>%
+  group_by(cluster) %>%
+  count(clean_titulaires, sort = TRUE) %>%
+  slice(1) %>%
+  ungroup() %>%
+  select(cluster, representative_name = clean_titulaires) %>%
+arrange(representative_name)
+
+cluster_summary <- cabinetstitulaires %>%
+  group_by(cluster) %>%
+  add_tally() %>%
+  arrange(desc(n)) %>%
+  mutate(representative_name = first(clean_titulaires)) %>%
+  select(cluster, representative_name, n) %>%
+  distinct()
+
+print(cluster_summary)
+```
+
+## Multiattributaires 
+On cherche ici à savoir quel est le profil des marchés multi attributaires : combinaison de petits, combinaison de gros et de petits, spécialisés thématiques ou généralisates ?
+
+
+# ARCHIVES
+
+```{r setup}
+## Archive GLOVE et FastTextFR
+
+# # glove_model <- fread("glove6B300d.txt", header = FALSE, quote = "")# Changer pour le modele glove au besoin 
+# glove_model <- fread("cc.fr.300.txt", header = FALSE, quote = "") 
+# words <- glove_model$V1
+# vectors <- as.matrix(glove_model[, -1, with = FALSE])
+# rownames(vectors) <- words
+# 
+# # Liste de mots à exclure
+# exclude_words <- c(stopwords("french"),"evaluation","action", "accompagnement", "etude","marche","mission","accord","realisation","prestation","objet","d'une","d'un")
+# 
+# # Mise à jour de la fonction de prétraitement
+# preprocess_text <- function(text) {
+#   text <- tolower(text)
+#   text <- gsub("[^[:alpha:]' ]", "", text)
+#   # Exclure les mots non pertinents
+#   words <- unlist(strsplit(text, " "))
+#   words <- words[!words %in% exclude_words]
+#   return(paste(words, collapse = " "))
+# }
+# 
+# # Fonction pour obtenir les vecteurs des mots
+# get_word_vectors <- function(text, word_vectors) {
+#   tokens <- unlist(tokenize_words(text))
+#   tokens <- tokens[tokens %in% rownames(word_vectors)]
+#   if(length(tokens) == 0) return(rep(NA, ncol(word_vectors)))
+#   word_embeddings <- word_vectors[tokens, , drop = FALSE]
+#   return(colMeans(word_embeddings, na.rm = TRUE))
+# }
+# 
+# # Application de la vectorisation sur les intitulés des marchés
+# boampdataBDD$processed_objet <- sapply(boampdataBDD$objet, preprocess_text)
+# boampdataBDD$vector <- t(sapply(boampdataBDD$processed_objet, get_word_vectors, word_vectors = vectors))
+# 
+# # # Identifier des thématiques (à des fins exploratoires uniquement)
+# # dtm <- DocumentTermMatrix(Corpus(VectorSource(boampdataBDD$processed_objet)))
+# # dtm <- dtm[-6095, ]
+# # lda_model <- LDA(dtm, k = 8)  # k est le nombre de thématiques à identifier
+# # topics <- terms(lda_model, 7)
+# 
+# # Fonction pour calculer le vecteur moyen d'une liste de mots
+# get_theme_vector <- function(keywords, word_vectors) {
+#   valid_keywords <- keywords[keywords %in% rownames(word_vectors)]
+#   if(length(valid_keywords) == 0) return(rep(NA, ncol(word_vectors)))
+#   keyword_embeddings <- word_vectors[valid_keywords, , drop = FALSE]
+#   return(colMeans(keyword_embeddings, na.rm = TRUE))
+# }
+# 
+# # Fonction pour calculer le vecteur moyen d'une liste de mots avec prise en compte des variantes
+# get_theme_vector <- function(keywords, word_vectors) {
+#   all_tokens <- rownames(word_vectors)
+#   valid_keywords <- unlist(lapply(keywords, function(keyword) {
+#     grep(paste0("^", keyword), all_tokens, value = TRUE)
+#   }))
+#   valid_keywords <- unique(valid_keywords[valid_keywords %in% all_tokens])
+#   if(length(valid_keywords) == 0) return(rep(NA, ncol(word_vectors)))
+#   keyword_embeddings <- word_vectors[valid_keywords, , drop = FALSE]
+#   return(colMeans(keyword_embeddings, na.rm = TRUE))
+# }
+# 
+# # Créer un vecteur pour chaque thématique
+# theme_vectors <- lapply(themes_keywords, get_theme_vector, word_vectors = vectors)
+# 
+# # Fonction pour attribuer une thématique basée sur la similarité du cosinus
+# assign_theme <- function(objet_vector, theme_vectors) {
+#   # Gestion des valeurs NA
+#   if(any(is.na(objet_vector))) {
+#     return(NA)
+#   } else {
+#     similarities <- sapply(theme_vectors, function(theme_vector) {
+#       sum(objet_vector * theme_vector) / (sqrt(sum(objet_vector^2)) * sqrt(sum(theme_vector^2)))
+#     })
+#     return(names(which.max(similarities)))
+#   }
+# }
+# # Appliquer la fonction sur chaque ligne de la matrice 'vector'
+# boampdataBDD$themeFrText <- apply(boampdataBDD$vector, 1, function(v) assign_theme(v, theme_vectors))
+```
+
+
+
+
+

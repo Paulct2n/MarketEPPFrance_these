@@ -1,0 +1,101 @@
+---
+title: "LexImpact"
+author: "Paul Cotton"
+date: "8/13/2024"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Import des packages de base  
+```{r setup}
+library(tidytext)
+library(dplyr)
+library(tidyverse)
+library(writexl)
+library(knitr)
+library(kableExtra)
+library(formattable)
+library(rvest)
+library(stringi)
+library(jsonlite)
+library(lubridate)
+library(openxlsx)
+library(stringr)
+library(sf)
+library(maps)
+library(ggplot2)
+library(ggrepel)
+library(readxl)
+library(tm)
+library(slam)
+library(stringi)
+```
+
+# Import BDD
+```{r setup}
+Amendements <- read_xlsx("/Users/paulcotton/Library/CloudStorage/OneDrive-IEPdeLyon/0. THESE 2019-2022 (ON LINE)/3. REDACTION/4. CHAPITRE 2/LexImapct députés.xlsx") 
+
+table(Amendements$Parti)
+```
+
+# Graphs
+```{r setup}
+
+amendements_count <- Amendements %>%
+  group_by(Année, Parti) %>%
+  summarise(Nombre = n(), .groups = 'drop') %>%
+  mutate(Parti = factor(Parti, levels = c(
+    "Démocrate (MoDem et Indépendants)",
+    "Socialistes et apparentés (membre de l’intergroupe NUPES)",
+    "Rassemblement National",
+    "Les Républicains",
+    "Mouvement Démocrate et apparentés",
+    "Socialistes et apparentés",
+    "La France insoumise",
+    "Gauche démocrate et républicaine",
+    "Non inscrit"
+  )))
+
+ggplot(amendements_count, aes(x = as.factor(Année), y = Nombre, fill = Parti)) +
+  geom_bar(stat = "identity", position = "stack") +
+  geom_text(aes(label = Nombre), 
+            position = position_stack(vjust = 0.5), 
+            color = "black", size = 3) +
+  scale_fill_manual(values = c(
+    "Gauche démocrate et républicaine" = "#900C3F",
+    "La France insoumise" = "#f42b00",
+    "Mouvement Démocrate et apparentés" = "#FFC300",
+    "Démocrate (MoDem et Indépendants)"= "#e7b248",
+    "Non inscrit" = "grey",
+    "Les Républicains" ="#4ca6d2",
+    "Rassemblement National" = "#0f1b83",
+    "Socialistes et apparentés" = "#f0b2ca",
+    "Socialistes et apparentés (membre de l’intergroupe NUPES)" ="#ee3bde"
+  )) +
+  labs(title = "Amendements déposés utilisant LexImpact par groupes parlementaires (2019-2023)",
+       x = "Année de dépôt",
+       y = "Nombre d'amendements",
+       subtitle = "N=71",
+       fill = NULL,  # Supprime le titre de la légende
+       caption = "Source : auteur, à partir des données opendata de l'Assemblée nationale") +
+       geom_vline(xintercept = c(3.5), linetype = "dotted", colour = "red", size=1) +
+  ggplot2::annotate("text", x = "2023", y = 33, label = "XVIeme législature",colour = "black", size=3) +
+  ggplot2::annotate("text", x = "2021", y = 33, label = "XVeme législature",colour = "black", size=3) +
+    theme_minimal() +
+  theme(legend.position = "right",
+        plot.caption = element_text(hjust = 0))
+```
+
+
+
+
+
+
+
+
+
+
+
